@@ -1,0 +1,1 @@
+"""Knowledge base subpackage (Phase 3A): source documents, chunking, embedding abstraction, ingestion."""

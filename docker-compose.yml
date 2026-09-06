@@ -1,0 +1,40 @@
+name: ai-customer-service-agent
+
+services:
+  postgres:
+    # pgvector 官方镜像 = PostgreSQL + pgvector 扩展,供后续 RAG 阶段直接使用
+    image: pgvector/pgvector:pg17
+    container_name: acsa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-acsa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-acsa_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-acsa}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-acsa} -d ${POSTGRES_DB:-acsa}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: acsa-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

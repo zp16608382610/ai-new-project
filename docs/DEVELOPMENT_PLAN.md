@@ -1,0 +1,144 @@
+# Development Plan
+
+> Enterprise AI Customer Service Agent 开发路线。状态同步 README「Current / Next Phase」。
+
+## Phase 状态
+
+- **Phase 1 — Foundation:completed**
+- **Phase 2A — Mock Business System · Database & Data Model:completed**
+- **Phase 2B — Mock Business System · Mock Business API:completed**
+- **Phase 2C — Business Scenario Tests:completed**
+- **Phase 3A — RAG · Knowledge Base & Ingestion:completed**
+- **Phase 3B — RAG · Retrieval:completed**
+- **Phase 3C — RAG · Reranking + Context Assembly:not started**
+- **Phase 3D — RAG · Knowledge Management & Integration:not started**
+- Phase 4 及以后均未开始。
+
+## Phase 1 — Foundation [COMPLETED]
+
+已完成:
+
+- 仓库骨架:`backend/`、`frontend/`、`tests/`、`docs/`、`docker-compose.yml`
+- 后端 FastAPI 基础服务:健康检查 `/api/v1/health`、环境变量配置、基础 logging、API 版本前缀、基础错误处理
+- 前端 Next.js + TypeScript 页面占位:`/`、`/chat`、`/console`、`/evaluation`
+- 测试基建:health 测试通过
+- 工程规范与文档:AGENTS.md、PRD.md、ARCHITECTURE.md、DECISIONS.md、README.md
+- docker-compose(PostgreSQL + Redis)已编写;⚠️ 本机无 Docker,未实机验证
+
+说明:CI、密钥管理、生产级可观测性基座等未在本阶段落地,后续按需补齐(避免虚假宣称)。
+
+## Phase 2A — Mock Business System · Database & Data Model [COMPLETED]
+
+已完成(本阶段只做数据层,不提供 HTTP 业务 API):
+
+- 定义电商售后领域对象与数据模型:用户、商品、订单、订单明细、物流、退款单、售后工单(7 张业务表)
+- SQLAlchemy 2.x 数据模型 + Alembic 初始迁移(全量建表已在新库验证;状态列使用 CHECK 约束)
+- 幂等确定性 seed:3 用户 / 8 商品 / 10 订单 / 12 明细 / 6 物流 / 3 退款 / 3 工单,覆盖 6 种订单状态、可退款与不可退订单、物流异常、退款 PENDING / COMPLETED / REJECTED
+- Repository 数据访问层(Agent → Tool → Service → Repository → Database;禁止上层直接写 SQL)
+- 数据层测试 9 例(FK 约束、状态 CHECK、seed 一致性与业务断言)+ health 测试;运行于内存 SQLite
+
+说明:⚠️ PostgreSQL 链路仅以 SQLite 验证,本机无 Docker,未对真实 PostgreSQL 实机验证。
+
+## Phase 2B — Mock Business System · Mock Business API [COMPLETED]
+
+已完成(调用链:HTTP API → Service → Repository → Database;不含风控/HITL,属 Phase 7):
+
+- Pydantic schemas 层(`app/schemas`):请求/响应契约,与 ORM 分离;金额统一序列化为 JSON number
+- Service 层(`app/services`,框架无关):订单查询、物流查询、用户订单列表(可按 status 过滤)、退款资格判定、创建退款申请(PENDING;金额由订单权威数据推导,禁止客户端指定)、取消订单状态机(仅 PENDING / PAID / SHIPPED 且无在途退款可取消)、工单创建(校验 user/order 引用)
+- API 层(`app/api/routes`,统一前缀 `/api/v1`):`GET /orders/{order_id}`、`GET /orders/{order_id}/logistics`、`GET /users/{user_id}/orders`、`POST /refunds/check-eligibility`、`POST /refunds`、`POST /orders/{order_id}/cancel`、`POST /tickets`
+- 统一错误结构 `{"status": "error", "code": ..., "detail": ...}`:404 资源不存在 / 409 冲突(重复退款、重复取消)/ 422 业务不允许或参数校验失败;不泄漏 SQLAlchemy 细节
+- Repository 增加聚合读取(订单全量、按用户+状态列表、最新物流、在途退款),测试验证 API 必须经由 Repository 访问数据
+- 测试 27 例(内存 SQLite + 确定性 seed):订单/物流/用户订单/退款资格/退款创建/取消/工单正反场景 + Repository 边界;与 2A 及 health 合计 37 例全绿
+- OpenAPI(/docs)自动暴露请求/响应 schema、错误响应与端点说明;未引入独立文档系统
+
+说明:⚠️ PostgreSQL/Docker 仍不可用,全部以 SQLite 验证;pgvector 未测试。`create_refund` 仅创建 PENDING 申请,`cancel` 直接执行取消;风控与人工审批在 Phase 7 接入(见 ARCHITECTURE §12)。
+
+## Phase 2C — Business Scenario Tests [COMPLETED]
+
+已完成(仅业务场景验证,不含任何 AI 组件):
+
+- 新增 `tests/test_business_scenarios.py`(26 例):S1 订单查询聚合、S2 物流查询(含无物流订单)、S3 不存在订单(404 受控错误、无实现泄漏)、S4 退款资格矩阵(eligible / 含不可退商品 / 已退款 / 在途退款 / 已取消 / 未支付 / 未签收)、S5 退款创建全链路(API→Service→Repository→DB;客户端伪造金额/状态被忽略,金额=订单权威金额)、S6 重复退款 409、S7 取消状态机(合法 PENDING/PAID/SHIPPED→CANCELLED 并持久化;非法转移 CANCELLED/DELIVERED/REFUNDED→CANCELLED 拒绝)、S8 工单创建(含省略 order_id 的用户级工单)
+- 跨域一致性:退款在途(PENDING)→ 取消被拒;已取消 → 退款被拒;已退款 → 再次退款被拒
+- 业务不变量:refund.amount == order.total_amount;取消订单不可再退款;单订单单一在途退款;ticket 引用完整性
+- 架构边界:保留既有 API→Repository spy 测试;新增场景级验证取消经 Service→Repository,路由不直接执行 SQL
+- 判定顺序说明:DELIVERED 订单不可取消优先于在途退款检查(返回 422 ORDER_NOT_CANCELLABLE);ORDER_HAS_ACTIVE_REFUND 为防御性守卫
+
+验证:全套 63 例全绿(SQLite);真实 HTTP smoke(health / get order / get logistics / eligibility / create refund / duplicate 409 / cancel / create ticket / 404)通过。⚠️ PostgreSQL / pgvector 仍未实机验证。
+## Phase 3A — RAG · Knowledge Base & Ingestion [COMPLETED]
+
+已完成(仅知识库接入与入库管线,不含检索 / Embedding / RAG 生成):
+
+- 知识数据模型:`knowledge_documents` + `knowledge_chunks`(SQLAlchemy,Alembic 迁移 `018c7c0772c7`;已在全新 SQLite 库 `upgrade head` 验证两表创建)。文档字段含 title / category / version / status / source / effective_date / language / checksum / metadata;chunk 含 document_id(FK CASCADE)/ chunk_index / section / content / metadata,预留 Phase 3B 增加 embedding 列。
+- 生命周期:DRAFT → ACTIVE → ARCHIVED;仅 ACTIVE 是未来检索候选(Repository `list_active` 固化该规则)。
+- 版本化:唯一键 (category, title, version),历史版本不覆盖;seed 内含「退款政策 v1(2026-08-01,DRAFT)与 v2(2026-09-01,ACTIVE)」以验证版本演进与历史保留。
+- 确定性 seed 知识:7 篇合成政策文档(退款 / 退货 / 换货 / 物流配送 / 优惠券 / 客服 SOP;退款含 v1/v2),见 `app/knowledge/documents.py` 与 `app/knowledge/seed.py`。
+- 规范化与分块:`app/knowledge/chunker.py`(normalize + 章节感知分块,纯标准库、确定性、可替换)。
+- Embedding 抽象:`app/knowledge/embedding.py`(`EmbeddingProvider` 接口 + 本地确定性桩;真实 provider / 向量入库留 Phase 3B)。
+- 摄取服务:`app/knowledge/ingestion.py`(KnowledgeSpec → normalize → sha256 checksum → 分块 → Repository → DB;幂等,与 FastAPI 解耦)。
+- 测试:`tests/test_knowledge.py` 12 例(文档创建 / 版本化 / 生命周期 / chunk 关系与元数据 / 幂等与冲突拒绝 / 溯源 / seed;全套 75 例全绿)。
+- 未新增任何依赖;未实现检索 API / Embedding / pgvector / RAG 生成。
+
+说明:⚠️ 数据库侧以 SQLite 全新库迁移验证;PostgreSQL / pgvector 仍未实机验证(本机无 Docker)。
+
+## Phase 3B — RAG · Retrieval [COMPLETED]
+
+已完成(Query → Query Processing → Dense + Sparse → RRF Fusion → Ranked Candidates;不含生成 / Rerank / Context Assembly):
+
+- 检索层 `app/retrieval/`:`types`(typed filters / candidates / result)、`text`(NFKC + 空白归一 + 空查询校验;确定性 CJK 字符二元组 tokenizer)、`bm25`(纯标准库 Okapi BM25 + 功能词二元组过滤 + 多词元最少共享门槛)、`dense`(`DenseRetriever` 抽象 + `LocalDenseRetriever` 本地确定性路径)、`fusion`(Reciprocal Rank Fusion)、`service`(`RetrievalService.retrieve(query, top_k, filters)`)、`dataset`(27 条确定性检索数据集)。
+- Dense 边界:复用 Phase 3A `EmbeddingProvider`;本地 `DeterministicEmbeddingProvider` 已升级为「词面重叠感知的确定性 bag-of-bigrams 向量」——**明确非语义 embedding**,文档已注明;`DenseRetriever` 接口为未来 pgvector/真实 provider 保留替换点。
+- Sparse:BM25 标准库实现(零新增依赖);tokenizer 对 CJK 用滑动二元组并过滤含功能字(的了么吗… )的噪声二元组,多词元查询需 ≥2 个不同共享词元,抑制单点假命中。
+- Fusion:RRF(k=60),rank-based、确定性;两路命中同一 chunk 时合并并记录双方法。
+- 元数据过滤:typed `RetrievalFilter(status=ACTIVE 默认 / category / language)`,Repository `list_retrieval_candidates` 强制 ACTIVE 生命周期规则(ARCHIVED/DRAFT 默认不参与检索,除非显式内部覆盖)。
+- 检索结果:typed `RetrievalCandidate`(chunk_id / document_id / title / category / version / section / content / score / rank / retrieval_methods / metadata)+ `RetrievalResult`(含 latency_ms);chunk→document→version→source 可溯源;无候选时返回空 candidates,不虚构答案。
+- 检索 API:仅内部 `RetrievalService`,未创建公开 customer-facing RAG 端点(符合边界)。
+- 测试:`tests/test_retrieval.py` 42 例(dense/sparse/hybrid、top_k、空查询、RRF 确定性与去重、category/language 过滤、ARCHIVED 默认排除 + v1/v2 版本行为、溯源、无结果 typed empty、27 条数据集);全套 **117 例全绿**。
+- 零新增依赖;未实现 LLM query rewrite / Reranker / Context Engineering / 生成(见 3C+)。
+
+说明:⚠️ PostgreSQL / pgvector **未实机验证**(本机无 Docker);数据库级向量检索性能未测量。本地 SQLite 检索测试通过。
+
+## Phase 3C — RAG · Reranking + Context Assembly [NOT STARTED]
+
+- Reranker(重排 dense/sparse 融合候选;检索质量层)
+- Context Assembly(为生成准备上下文窗口与格式;引用格式与溯源输出准备)
+- 检索质量基线增强(在 Phase 3B 27 条数据集基础上演进)
+- 范围与拆解将在 Phase 3C 启动时细化;LLM 生成 / Grounding / 拒答策略由其后的阶段(3D / Phase 4)承接
+
+## Phase 3D — RAG · Knowledge Management & Integration [NOT STARTED]
+
+- 知识库管理 API / 管理界面(上传、版本管理、激活/归档)
+- 与 Phase 4 Agent(Knowledge Agent)的集成边界
+- 范围与拆解将在 Phase 3C 完成时细化
+## Phase 4 — Agent [NOT STARTED]
+
+- LLM 接入(未来集成使用 OpenAI Responses API)与对话编排(LangGraph)
+- Supervisor / Router 与子 Agent(Knowledge / Order / After-sales),遵循「不为 Multi-Agent 而 Multi-Agent」
+- 会话状态管理、流式输出、前端 Chat 页接通
+
+## Phase 5 — Tools [NOT STARTED]
+
+- Tool Calling 定义、注册与执行框架
+- 售后域工具接入(mock → 真实逻辑)
+- 工具结果校验与失败回退
+
+## Phase 6 — MCP [NOT STARTED]
+
+- Customer Service MCP Server:标准化暴露工具/上下文
+- MCP 网关与权限边界(MCP 不负责决策)
+
+## Phase 7 — Risk + HITL [NOT STARTED]
+
+- 风控规则引擎与风险分级(LOW/MEDIUM/HIGH/CRITICAL)
+- Interrupt → Approval → Resume 人工介入
+- 审批队列与审计(Console 页接通)
+
+## Phase 8 — Evaluation + Observability [NOT STARTED]
+
+- 检索/生成/Agent/工具/产品五层评测与回归流程(Evaluation 页接通)
+- 端到端 trace:request → model → state → retrieval → tool → result → answer
+- 指标、日志聚合与行为审计
+
+## Phase 9 — Final Demo [NOT STARTED]
+
+- 端到端演示脚本与场景
+- 部署/发布准备(镜像、compose 完善、文档)
+- 验收与收尾

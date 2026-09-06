@@ -1,0 +1,22 @@
+"""ORM models. Import this package so every model is registered on Base.metadata."""
+from app.db.base import Base
+from app.db.models.user import User
+from app.db.models.product import Product
+from app.db.models.order import Order, OrderItem
+from app.db.models.logistics import Logistics
+from app.db.models.refund import Refund
+from app.db.models.ticket import Ticket
+from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
+
+__all__ = [
+    "Base",
+    "User",
+    "Product",
+    "Order",
+    "OrderItem",
+    "Logistics",
+    "Refund",
+    "Ticket",
+    "KnowledgeChunk",
+    "KnowledgeDocument",
+]
