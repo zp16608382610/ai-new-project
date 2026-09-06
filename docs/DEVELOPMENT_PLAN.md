@@ -12,7 +12,12 @@
 - **Phase 3B — RAG · Retrieval:completed**
 - **Phase 3C — RAG · Reranking + Context Assembly:completed**
 - **Phase 3D — RAG · Knowledge Management & Integration:not started**
-- Phase 4 及以后均未开始。
+- **Phase 4A — Agent · Workflow(State / Intent / Routing / RAG branch / ToolRequest interface):completed**
+- **Phase 4B — Agent · Tool Execution:completed**(工具执行框架与售后域工具接入完成,原「Phase 5 — Tools」范围并入)
+- **Phase 5 — Risk Control + Human-in-the-loop:not started**(下一阶段)
+- **Phase 6 — MCP:not started**
+- **Phase 7 — Evaluation + Observability:not started**
+- **Phase 8 — Final Demo:not started**
 
 ## Phase 1 — Foundation [COMPLETED]
 
@@ -41,7 +46,7 @@
 
 ## Phase 2B — Mock Business System · Mock Business API [COMPLETED]
 
-已完成(调用链:HTTP API → Service → Repository → Database;不含风控/HITL,属 Phase 7):
+已完成(调用链:HTTP API → Service → Repository → Database;不含风控/HITL,属 Phase 5):
 
 - Pydantic schemas 层(`app/schemas`):请求/响应契约,与 ORM 分离;金额统一序列化为 JSON number
 - Service 层(`app/services`,框架无关):订单查询、物流查询、用户订单列表(可按 status 过滤)、退款资格判定、创建退款申请(PENDING;金额由订单权威数据推导,禁止客户端指定)、取消订单状态机(仅 PENDING / PAID / SHIPPED 且无在途退款可取消)、工单创建(校验 user/order 引用)
@@ -51,7 +56,7 @@
 - 测试 27 例(内存 SQLite + 确定性 seed):订单/物流/用户订单/退款资格/退款创建/取消/工单正反场景 + Repository 边界;与 2A 及 health 合计 37 例全绿
 - OpenAPI(/docs)自动暴露请求/响应 schema、错误响应与端点说明;未引入独立文档系统
 
-说明:⚠️ PostgreSQL/Docker 仍不可用,全部以 SQLite 验证;pgvector 未测试。`create_refund` 仅创建 PENDING 申请,`cancel` 直接执行取消;风控与人工审批在 Phase 7 接入(见 ARCHITECTURE §12)。
+说明:⚠️ PostgreSQL/Docker 仍不可用,全部以 SQLite 验证;pgvector 未测试。`create_refund` 仅创建 PENDING 申请,`cancel` 直接执行取消;风控与人工审批在 Phase 5 接入(见 ARCHITECTURE §12)。
 
 ## Phase 2C — Business Scenario Tests [COMPLETED]
 
@@ -110,41 +115,56 @@
 
 ## Phase 3D — RAG · Knowledge Management & Integration [NOT STARTED]
 
-> 下一阶段:Phase 3C 完成后进入(尚未开始)。范围:知识库管理 API / 界面(上传、版本管理、激活/归档);真实 Embedding 模型与 pgvector 的接入与实机验证(Decision 013 的后续,范围在启动时细化);与 Phase 4 Agent(Knowledge Agent)的集成边界。不实现 LLM 生成/Agent 编排。
+> 状态:尚未开始(在 Phase 4A 之后按需启动)。范围:知识库管理 API / 界面(上传、版本管理、激活/归档);真实 Embedding 模型与 pgvector 的接入与实机验证(Decision 013 的后续,范围在启动时细化);与 Phase 4 Agent(Knowledge Agent)的集成边界。不实现 LLM 生成/Agent 编排。
 
 - 知识库管理 API / 管理界面(上传、版本管理、激活/归档)
 - 与 Phase 4 Agent(Knowledge Agent)的集成边界
 - 范围与拆解将在 Phase 3D 启动时细化
-## Phase 4 — Agent [NOT STARTED]
+## Phase 4A — Agent · Workflow(State / Intent / Routing / RAG branch / ToolRequest interface)[COMPLETED]
 
-- LLM 接入(未来集成使用 OpenAI Responses API)与对话编排(LangGraph)
-- Supervisor / Router 与子 Agent(Knowledge / Order / After-sales),遵循「不为 Multi-Agent 而 Multi-Agent」
-- 会话状态管理、流式输出、前端 Chat 页接通
+已完成(Agent 层骨架;未调用真实 LLM、未执行 Tool、未接 MCP/风控/HITL;遵循「LangGraph 仅作编排且本阶段不引入」= Decision 024):
 
-## Phase 5 — Tools [NOT STARTED]
+- 新增 `backend/app/agent/`:state(`Intent` / `Route` / `AgentState` / `AgentResult` / `ToolRequest` 强类型与序列化)、intent(`IntentClassifier` Protocol + `DeterministicIntentClassifier` 规则实现,文档注明非生产 NLP)、entities(`EntityExtractor` + 确定性正则实现;多订单不猜测)、router(`WorkflowRouter` + `RuleBasedRouter`;**Intent ≠ Route**)、workflow(`AgentWorkflow` framework-agnostic 状态机:START → UNDERSTAND → CLASSIFY_INTENT → ROUTE → RAG / BUSINESS_TOOL_REQUEST / CLARIFY / ESCALATE → FINALIZE → END)。
+- RAG 分支:通过 `RetrievalRunner` 接口调用既有 `RetrievalPipeline.run(query)`(不复制检索逻辑),在 `AgentState.retrieved_context` 保留结构化 `ContextPackage`(含 citation/溯源),供后续 grounding / observability。
+- 业务 Tool 分支:只产生 typed `ToolRequest`(tool_name / arguments / reason / requires_confirmation / status=PENDING),**绝不执行**(执行属 Phase 4B:Agent → Tool → Service → Repository → Database)。
+- 路由示例:REFUND_INQUIRY → RAG、REFUND_REQUEST → REFUND_TOOL、ORDER_STATUS / LOGISTICS_TRACKING → 对应 TOOL、UNSUPPORTED → ESCALATE、AMBIGUOUS → CLARIFY;缺订单/多订单 → CLARIFY,**不猜单**。
+- Response State:`AgentResult`(status / response / intent / route / citations / tool_requests / needs_clarification / escalation_required / error);自然语言最终回复由后续 LLM 阶段生成。
+- 新增测试:`tests/test_agent_intent.py`、`tests/test_agent_router.py`、`tests/test_agent_workflow.py`(覆盖 25 项清单 + Scenario A–D,含真实 RetrievalPipeline 集成与「agent 层不 import sqlalchemy/app.db」边界);全套 154 + 59 = **213 例全绿**。
+- 零新增依赖;不 commit / 不进入 Phase 4B。
 
-- Tool Calling 定义、注册与执行框架
-- 售后域工具接入(mock → 真实逻辑)
-- 工具结果校验与失败回退
+## Phase 4B — Agent · Tool Execution [COMPLETED]
+
+已完成(Phase 4A 只规划 `ToolRequest`;Phase 4B 真正执行:Agent → Tool → Service → Repository → Database;未接真实 LLM / 风控 / HITL,退款与取消仍走 Mock Service 规则,`create_refund` 只生成 PENDING 申请):
+
+- 新增 `backend/app/tools/`:`base.py`(`RiskLevel` / `ToolResultStatus` / `ToolResult` / `ToolExecutionContext` / `ToolDefinition` 契约;ToolResult 为稳定 domain 对象,永不返回 ORM)、`errors.py`(Tool 层错误与稳定错误码,如 UNKNOWN_TOOL / UNAUTHORIZED_ORDER_ACCESS / INTERNAL_TOOL_ERROR)、`registry.py`(`ToolRegistry`:register / get / has / list,重复注册显式报错,显式 allowlist,禁止 getattr / eval / 动态 importlib)、`executor.py`(`ToolExecutor`:查 Registry → Pydantic 参数校验 → 覆盖 user_id 为可信上下文 → 执行 handler → 统一归一化为 ToolResult)、`definitions.py`(6 个工具的 Pydantic Input/Output schema:`GetOrderInput` … `CreateTicketInput` + `OrderToolOutput` … `TicketToolOutput`)、`handlers.py`(六个工具 handler + `build_default_registry(session)` 接线)。
+- 工具清单(全部经 Service,不复制业务规则):`get_order` / `get_logistics` / `check_refund_eligibility` / `create_refund`(金额由 Service 权威决定,模型传 amount=0.01 无效)/ `cancel_order`(保留 requires_confirmation / risk metadata)/ `create_ticket`(reason/category 非空、description 非空、order_id 如存在须属于该用户)。
+- Authorization:订单「存在」与「可访问」分离——跨用户查订单 / 物流 / 退款 / 取消一律拒绝(`UNAUTHORIZED_ORDER_ACCESS`),`user_id` 只来自可信 `ToolExecutionContext`,模型参数不能覆盖。
+- Agent 集成(`backend/app/agent/workflow.py`):注入 `ToolExecutor` 后 ORDER_TOOL / LOGISTICS_TOOL / REFUND_TOOL / CANCEL_TOOL / TICKET_TOOL 真正执行,ToolResult 存入 `AgentState.tool_results` 并 FINALIZE;CLARIFY / ESCALATE / RAG 分支不执行工具;未注入 executor 时保持 Phase 4A 只规划行为(向后兼容)。
+- Refund 流程:REFUND_REQUEST → `check_refund_eligibility` → eligible=True 才追加 `create_refund`;ineligible / 越权一律不触达退款 Service。
+- ToolResult metadata 预留 observability:execution_id / request_id / tool_name / duration_ms / success(不引入 OpenTelemetry)。
+- 新增测试:`tests/test_tools.py`(Registry / Validation / Authorization / 六工具正反场景)、`tests/test_tool_executor.py`(执行 / UNKNOWN_TOOL / 校验与业务错误归一化 / 异常归一化 / user_id 不可覆盖)、`tests/test_agent_tool_integration.py`(ORDER_STATUS / LOGISTICS / REFUND 条件退款 / CANCEL / TICKET 经 Agent 全链路 + CLARIFY / ESCALATE / RAG 不执行 + 端到端 User request → … → DB → AgentResult);全套 **213 + 60 = 273 例全绿**,`compileall -q backend` 通过。
+- 零新增依赖;不 commit / 不进入 Phase 5(Risk Control + Human-in-the-loop)。
+
+## Phase 5 — Risk Control + Human-in-the-loop [NOT STARTED]
+
+> 下一阶段:Phase 4B 完成后进入。原「Phase 5 — Tools」的 Tool Calling 定义 / 注册 / 执行框架与售后域工具接入已在 Phase 4B 内完成,后续阶段按此重排:Phase 5 = Risk Control + HITL、Phase 6 = MCP、Phase 7 = Evaluation + Observability、Phase 8 = Final Demo。
+
+- 风控规则引擎与风险分级(LOW / MEDIUM / HIGH / CRITICAL)在 Tool Execution 之上生效(工具已携带 risk_level metadata)
+- 高风险操作先过风控再执行;CRITICAL 默认转人工
+- Interrupt → Approval → Resume 人工介入;审批队列与审计(Console 页接通)
 
 ## Phase 6 — MCP [NOT STARTED]
 
 - Customer Service MCP Server:标准化暴露工具/上下文
-- MCP 网关与权限边界(MCP 不负责决策)
+- MCP 网关与权限边界(MCP 不负责 Agent decision logic)
 
-## Phase 7 — Risk + HITL [NOT STARTED]
-
-- 风控规则引擎与风险分级(LOW/MEDIUM/HIGH/CRITICAL)
-- Interrupt → Approval → Resume 人工介入
-- 审批队列与审计(Console 页接通)
-
-## Phase 8 — Evaluation + Observability [NOT STARTED]
+## Phase 7 — Evaluation + Observability [NOT STARTED]
 
 - 检索/生成/Agent/工具/产品五层评测与回归流程(Evaluation 页接通)
-- 端到端 trace:request → model → state → retrieval → tool → result → answer
+- 端到端 trace:request → model → state → retrieval → tool → result → answer(ToolResult metadata 已预留 execution_id / duration_ms 等)
 - 指标、日志聚合与行为审计
 
-## Phase 9 — Final Demo [NOT STARTED]
+## Phase 8 — Final Demo [NOT STARTED]
 
 - 端到端演示脚本与场景
 - 部署/发布准备(镜像、compose 完善、文档)

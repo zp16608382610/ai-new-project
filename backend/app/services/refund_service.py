@@ -3,7 +3,7 @@
 设计说明:
 - 退款资格与金额判定是业务规则,由 Service 决定,不允许客户端自定义金额。
 - 本阶段创建的是退款申请(PENDING),不执行资金操作;资金执行、风控与
-  人工审批属于 Phase 7(PRD §5 S5 / §7 CRITICAL)。
+  人工审批属于 Phase 5(PRD §5 S5 / §7 CRITICAL)。
 - 全额退款金额 = 订单 authoritative total_amount(与明细 sum 一致,见 seed 断言)。
 """
 from decimal import Decimal

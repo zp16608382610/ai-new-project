@@ -22,7 +22,19 @@
 | 016 | Context assembly independence | Accepted | 2026-09-06 |
 | 017 | Token budget owned by context layer | Accepted | 2026-09-06 |
 | 018 | Deterministic reranker (architecture/test only) | Accepted | 2026-09-06 |
-
+| 019 | Intent and Route separation | Accepted | 2026-09-06 |
+| 020 | AgentState as domain state (not framework state) | Accepted | 2026-09-06 |
+| 021 | Agent layer has no direct database access | Accepted | 2026-09-06 |
+| 022 | Static knowledge vs dynamic data / business actions (agent level) | Accepted | 2026-09-06 |
+| 023 | Ambiguous requests are never guessed (CLARIFY) | Accepted | 2026-09-06 |
+| 024 | LangGraph is orchestration only; Phase 4A stays framework-agnostic | Accepted | 2026-09-06 |
+| 025 | Tool Registry is an explicit allowlist | Accepted | 2026-09-06 |
+| 026 | Tool arguments are schema-validated | Accepted | 2026-09-06 |
+| 027 | user_id comes from the trusted execution context | Accepted | 2026-09-06 |
+| 028 | Agent never reaches the DB; tools are the execution boundary | Accepted | 2026-09-06 |
+| 029 | Tools do not carry business rules | Accepted | 2026-09-06 |
+| 030 | ToolResult uses stable domain schemas | Accepted | 2026-09-06 |
+| 031 | Phase 4B executes one tool call first (refund = eligibility + conditional refund) | Accepted | 2026-09-06 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -176,3 +188,160 @@ Phase 3C ships only `DeterministicReranker`, a deterministic, standard-library, 
 
 **Reason:**
 The phase focuses on architecture and testability, not model quality. Keeping the `Reranker` interface as the swap point avoids adding heavyweight ML dependencies (transformers / torch / sentence-transformers) without a proven need; a semantic reranker can be introduced behind the same interface in a later phase.
+## Decision 019 — Intent and Route are separate
+
+**Decision:**
+Intent (what the user wants) and Route (which pipeline step runs next) are separate typed enums
+(`app/agent/state.py`). The router only maps Intent + extracted entities onto a Route; it never
+contains order / refund / RAG business logic. Examples: REFUND_INQUIRY → RAG while
+REFUND_REQUEST → REFUND_TOOL; UNSUPPORTED → ESCALATE; AMBIGUOUS → CLARIFY.
+
+**Reason:**
+Classification and routing are different concerns with different future implementations
+(LLM classifier vs model/rule router). Keeping them separate avoids `if intent == ...` business
+logic piling up in the router and keeps both independently replaceable and testable.
+
+## Decision 020 — AgentState is domain state, not framework state
+
+**Decision:**
+`app/agent/state.py` defines our own domain `AgentState` / `AgentResult` dataclasses. Business and
+orchestration code depend on these types; they never depend on a LangGraph state object. A later
+LangGraph adapter maps domain state onto graph state (adapter layer), never the reverse.
+
+**Reason:**
+The orchestration framework must stay replaceable (Decision 002 constraint); domain state is the
+stable contract across phases (observability / evaluation / HITL later read the same fields).
+
+## Decision 021 — Agent layer has no direct database access
+
+**Decision:**
+The agent package never imports SQLAlchemy / `app.db` / `app.services` / `app.api` and never opens
+a session. Knowledge reaches the workflow only through the existing `RetrievalPipeline` entry
+point (injected as the `RetrievalRunner` interface); dynamic business data/actions are reached only
+through planned `ToolRequest`s executed later by Tool → Service → Repository.
+
+**Reason:**
+Enforces Decision 001/003 boundaries at the Agent layer: no LLM → SQL, no RAG → order database,
+no writing order state into the knowledge base, and no Agent code path that can bypass Service
+validation (architecture test asserts the package imports stay clean).
+
+## Decision 022 — Static knowledge vs dynamic data / business actions (agent level)
+
+**Decision:**
+At the Agent layer: static knowledge questions route to RAG; dynamic business data and business
+actions route to the business tool interface. Phase 4A plans a `ToolRequest` but never executes a
+tool; Phase 4B executes it through the Tool layer under Service rules (Risk Control / HITL in Phase 5).
+
+**Reason:**
+Restates Decision 001 at the agent boundary: policy content must never substitute authoritative
+order / refund / logistics data, and business actions must never execute outside business rules.
+
+## Decision 023 — Ambiguous requests are never guessed
+
+**Decision:**
+When a required entity is missing (e.g. refund / cancel without an explicit order id) or the
+message references several distinct orders, the workflow routes to CLARIFY and returns a
+`needs_clarification` Response State. The agent never picks a "most recent" order or the first id.
+
+**Reason:**
+Guessing order references on high-impact actions creates wrong-target risk. Asking is
+deterministic, cheap and auditable, and matches PRD "do not guess" requirements for after-sales
+actions.
+
+## Decision 024 — LangGraph is orchestration only; Phase 4A stays framework-agnostic
+
+**Decision:**
+LangGraph remains the target orchestration / runtime layer (Decision 002), but Phase 4A adds no
+LangGraph dependency. Phase 4A ships a small deterministic state machine
+(`app/agent/workflow.py`) whose nodes are orchestration only; `AgentState` can be mapped onto
+LangGraph state through a later adapter without rewriting business code.
+
+**Reason:**
+Phase 4A has no exercised need for an external graph runtime; adding LangGraph now would add
+complexity without value and violate the dependency discipline (AGENTS.md "do not add unnecessary
+dependencies"). The adapter seam keeps Decision 002 reachable later.
+
+## Decision 025 — Tool Registry is an explicit allowlist
+
+**Decision:**
+All business tools are registered in one `ToolRegistry` (`backend/app/tools/registry.py`).
+The Agent / ToolExecutor resolves tools by name from the registry only; there is no
+`getattr` / `eval` / dynamic `importlib` dispatch. Duplicate registration raises
+explicitly; unknown names produce the stable `UNKNOWN_TOOL` error.
+
+**Reason:**
+The registry is a security boundary: it makes the full set of callable tools
+auditable and prevents a model or agent from invoking arbitrary functions.
+
+## Decision 026 — Tool arguments must pass schema validation
+
+**Decision:**
+Every tool defines an explicit Pydantic input schema (`backend/app/tools/definitions.py`).
+Model- or agent-produced arguments are never trusted: the ToolExecutor validates them
+before any handler runs (missing fields / wrong types / empty strings / invalid order
+references all normalize to `VALIDATION_ERROR`).
+
+**Reason:**
+"JSON came out of a model" is not an excuse to skip validation; invalid arguments must
+fail fast with a stable, structured result instead of reaching the Service layer.
+
+## Decision 027 — user_id uses the trusted execution context
+
+**Decision:**
+`ToolExecutionContext.user_id` comes from the authenticated Agent / session context.
+The ToolExecutor always overrides any model-supplied `user_id` in arguments with the
+trusted context value before validation.
+
+**Reason:**
+A model cannot escalate privileges by passing `user_id="another_user"`; identity is a
+session property, never an argument.
+
+## Decision 028 — Agent never reaches the DB; tools are the execution boundary
+
+**Decision:**
+The Agent layer never imports SQLAlchemy / `app.db` / `app.services` / `app.api`
+(architecture test enforced since Phase 4A). Phase 4B business actions run through an
+injected ToolExecutor: Agent → Tool → Service → Repository → Database.
+
+**Reason:**
+Keeps Decision 021 enforceable now that tools actually execute: there is still no Agent
+code path that can bypass Service validation or write directly to the database.
+
+## Decision 029 — Tools do not carry business rules
+
+**Decision:**
+Refund eligibility, authoritative refund amounts, the cancellation state machine,
+duplicate-refund detection and ticket entity validation stay in the Service layer.
+Tool handlers only normalize input/output and enforce the execution-time authorization
+boundary (an order that exists but belongs to another user is rejected).
+
+**Reason:**
+Business rules must have exactly one owner (the Service layer) so Mock (Phase 2B) and
+real backends behave identically; the Tool layer is a thin, replaceable adapter.
+
+## Decision 030 — ToolResult uses stable domain schemas
+
+**Decision:**
+Tools never return ORM objects. Each tool declares an output schema
+(`OrderToolOutput` / `LogisticsToolOutput` / `RefundEligibilityToolOutput` /
+`RefundToolOutput` / `CancelOrderToolOutput` / `TicketToolOutput`) and the executor
+stores JSON-serializable dicts in `AgentState.tool_results`.
+
+**Reason:**
+A stable, schema-bound result keeps Agent state serializable, prevents internal
+database fields / sensitive data from leaking and gives observability / evaluation a
+fixed contract to consume.
+
+## Decision 031 — Phase 4B executes one tool call first (refund is conditional)
+
+**Decision:**
+Phase 4B keeps execution simple: a normal request plans one tool call, executes it once
+and stores one ToolResult (the loop is data-driven and can grow later). REFUND_REQUEST
+is the one explicit exception: it runs `check_refund_eligibility` first and only appends
+`create_refund` when eligibility says eligible=True; otherwise the refund service is
+never reached. Full Risk Control / Human-in-the-loop lands in Phase 5.
+
+**Reason:**
+Fidelity to the refund requirement (never create a refund on an ineligible order)
+matters more than mechanical one-call symmetry; the sequence stays readable and the
+second step is not a general agent loop.

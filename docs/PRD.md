@@ -47,11 +47,11 @@
 - FR-API:统一 API 前缀 `/api/v1`,统一错误响应结构。
 - FR-CHAT:多轮对话会话管理(当前未实现,Phase 4)。
 - FR-RAG:静态知识问答:Query → Rewrite → Vector Search + BM25 → Fusion → Reranker → Context Assembly → LLM → Grounding Validation(Phase 3)。
-- FR-TOOLS:通过工具访问动态业务数据:`get_order` / `get_logistics` / `check_refund_eligibility` / `create_refund` / `cancel_order` / `create_ticket`(Phase 2B 提供 mock,Phase 5 接入)。
-- FR-RISK:按风险等级(LOW/MEDIUM/HIGH/CRITICAL)分级处置,高风险不直接执行(Phase 7)。
-- FR-HITL:Interrupt → Approval → Resume 的人工介入流程(Phase 7)。
-- FR-EVAL:检索/生成/Agent/工具/产品五层评测(Phase 8)。
-- FR-OBS:端到端可观测:request → model → state → retrieval → tool → result → answer(Phase 8)。
+- FR-TOOLS:通过工具访问动态业务数据:`get_order` / `get_logistics` / `check_refund_eligibility` / `create_refund` / `cancel_order` / `create_ticket`(Phase 2B 提供 mock,Phase 4B 已接入 Agent 执行)。
+- FR-RISK:按风险等级(LOW/MEDIUM/HIGH/CRITICAL)分级处置,高风险不直接执行(Phase 5)。
+- FR-HITL:Interrupt → Approval → Resume 的人工介入流程(Phase 5)。
+- FR-EVAL:检索/生成/Agent/工具/产品五层评测(Phase 7)。
+- FR-OBS:端到端可观测:request → model → state → retrieval → tool → result → answer(Phase 7)。
 
 场景级(占位,细节在各 Phase 细化):
 
@@ -89,7 +89,7 @@
 
 ## 9. Evaluation
 
-五层评测(Phase 8 细化):
+五层评测(Phase 7 细化):
 
 - Retrieval:召回率、MRR/NDCG 等检索质量。
 - Generation:回答准确性、忠实于检索结果(grounding)、可读性。
@@ -99,7 +99,7 @@
 
 ## 10. Observability
 
-全链路可观测(Phase 8 细化),一次请求应可追踪:
+全链路可观测(Phase 7 细化),一次请求应可追踪:
 
 request → model → state → retrieval → tool → result → answer
 
@@ -107,7 +107,7 @@ request → model → state → retrieval → tool → result → answer
 
 ## 11. MVP Scope
 
-首个可交付闭环(以 Phase 2B–Phase 7 落地为前提,最终以开发排期为准):
+首个可交付闭环(以 Phase 2B–Phase 5 落地为前提,最终以开发排期为准):
 
 - S1 FAQ(纯知识问答 + 出处)
 - S2 / S3 Order Lookup / Logistics(只读查询)

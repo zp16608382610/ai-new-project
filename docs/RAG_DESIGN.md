@@ -87,8 +87,7 @@ retrieval_methods。检索层 metadata 快照与 FK 双重可查。
 
 ## 7. 当前验证状态
 
-- SQLite 内存库 + 确定性 seed:**全套 154 例测试通过**(含 3B 42 例与 3C
-  rerank/context 用例)。
+- SQLite 内存库 + 确定性 seed:检索链路相关用例(3B 42 例 + 3C rerank/context 用例)全部通过;项目全套测试(含 Phase 4A / 4B)共 273 例全绿,见 README / DEVELOPMENT_PLAN。
 - 本地 dense 桩为词面重叠感知的确定性向量,**非语义**;真实语义质量需要
   真实 Embedding 模型 + pgvector(后续阶段)。
 - ⚠️ PostgreSQL / pgvector **未实机验证**(本机无 Docker),数据库级向量检索

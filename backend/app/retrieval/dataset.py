@@ -1,6 +1,6 @@
 """Small deterministic retrieval test dataset (Phase 3B).
 
-Purpose: verify retrieval behavior during development - NOT the Phase 8
+Purpose: verify retrieval behavior during development - NOT the Phase 7
 evaluation framework.
 
 Query kinds: keyword (exact surface terms), paraphrase (different wording that

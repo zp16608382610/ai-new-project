@@ -1,6 +1,6 @@
 # Architecture — Enterprise AI Customer Service Agent
 
-> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索与 Phase 3C 重排 + 上下文组装已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
+> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索、Phase 3C 重排 + 上下文组装与 Phase 4A Agent Workflow 骨架、Phase 4B Tool Execution 已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
 
 ## 1. System Architecture
 
@@ -57,7 +57,7 @@ Query
 
 ## 4. Tools
 
-工具清单(动态业务数据/操作;Phase 2A 已落地 mock 数据模型与 Repository,Phase 2B 已提供 mock HTTP API,Phase 5 以 Tools 接入 Agent):
+工具清单(动态业务数据/操作;Phase 2A 已落地 mock 数据模型与 Repository,Phase 2B 已提供 mock HTTP API,Phase 4B 已通过 Tool Registry + ToolExecutor 接入 Agent——见 §18):
 
 - `get_order` — 查订单
 - `get_logistics` — 查物流
@@ -97,7 +97,7 @@ Interrupt → Approval → Resume
 
 ## 8. Evaluation
 
-五层评测(Phase 8):
+五层评测(Phase 7):
 
 - Retrieval / Generation / Agent / Tool / Product
 
@@ -176,19 +176,19 @@ HTTP API → Service → Repository → Database
 - 与 §11 相同:动态业务数据必须经过权威系统与业务校验(Decision 001/003),表结构与 SQL 不进入编排层(Decision 002),写操作先过风控与人工审批(Decision 004/005)。
 - Agent 只负责意图理解与编排;执行一律通过 Tool →(本层)Service 完成,规则与审计不被绕过。
 
-Mock API 与未来 Agent Tool 的映射(Phase 5 落地):
+Mock API 与 Agent Tool 的映射(Phase 4B 已落地执行):
 
-| Mock API(Phase 2B,前缀 /api/v1) | 未来 Tool(Phase 5) | 对应 PRD 场景 |
+| Mock API(Phase 2B,前缀 /api/v1) | Agent Tool(Phase 4B) | 对应 PRD 场景 |
 | --- | --- | --- |
 | GET /orders/{order_id} | get_order | S2 Order Lookup |
 | GET /orders/{order_id}/logistics | get_logistics | S3 Logistics |
 | GET /users/{user_id}/orders | (支撑查询) | S2 |
 | POST /refunds/check-eligibility | check_refund_eligibility | S4 Refund Eligibility |
-| POST /refunds | create_refund(申请) | S5 Refund Execution(Phase 7 加风控/HITL) |
-| POST /orders/{order_id}/cancel | cancel_order | S6 Cancel Order(Phase 7 加风控/HITL) |
+| POST /refunds | create_refund(申请) | S5 Refund Execution(Phase 5 加风控/HITL) |
+| POST /orders/{order_id}/cancel | cancel_order | S6 Cancel Order(Phase 5 加风控/HITL) |
 | POST /tickets | create_ticket | S7 Complaint |
 
-说明:Phase 2B 的 `create_refund` 只创建 PENDING 退款申请、`cancel` 直接执行取消——两者目前都未接入风控与人工审批(Risk Control / HITL 属 Phase 7,届时高危操作先过 Risk Control 再调用本层服务)。
+说明:Phase 2B 的 `create_refund` 只创建 PENDING 退款申请、`cancel` 直接执行取消——两者目前都未接入风控与人工审批(Risk Control / HITL 属 Phase 5,届时高危操作先过 Risk Control 再调用本层服务)。
 
 ## 13. Business Scenario Validation(Phase 2C 落地)
 
@@ -263,4 +263,59 @@ Hybrid Retrieval → Top 20(Candidate Set)
 - **Context Assembly 层**(\`app/retrieval/context.py\`):接收 reranked candidates,执行版本安全的去重(chunk_id;同文档同节同内容;不同版本不合并、不删除历史)与防御性 ACTIVE 优先(同 category+title+section 组;DRAFT/ARCHIVED 仅在该组无 ACTIVE 时兜底),再按 relevance 顺序整块装入 token budget,输出 \`ContextItem\` + \`ContextPackage\`(query / items / total_items / truncated / token_budget / estimated_tokens),每项保留 chunk_id / document_id / source_id / title / category / version / status / section / language / content / relevance_score / retrieval_methods 全量溯源。(Decision 016 / 017)
 - **Token Budget 归属**:预算与 reserve 完全由 context 层(\`ContextBudget\`)控制;无 tokenizer 依赖时用确定性近似 \`estimate_tokens()\`(CJK≈1 字/token、ASCII≈4 字符/token,文档注明仅为 approximation),超预算整块停止、绝不截断到不可读;reserve 为未来 system/user prompt 与 answer 预留。(Decision 017)
 - **Grounding Boundary**:Context Assembly 只决定「最终 Context 里有什么」;不编造答案、不自动补知识、不调用业务 API / 订单 / 退款 / 取消。静态知识走 RAG,动态业务事实在 Agent Phase 经 Tools 获取。
-- **内部入口**:\`RetrievalPipeline.run(query)\`(FastAPI 无关);本阶段不创建公开 customer-facing RAG 端点。端到端链路 Query → Hybrid Retrieval → Rerank → Context 由测试覆盖;全套 154 例全绿(SQLite)。⚠️ PostgreSQL / pgvector 仍未实机验证。
+- **内部入口**:\`RetrievalPipeline.run(query)\`(FastAPI 无关);本阶段不创建公开 customer-facing RAG 端点。端到端链路 Query → Hybrid Retrieval → Rerank → Context 由测试覆盖(SQLite)。⚠️ PostgreSQL / pgvector 仍未实机验证(项目全套测试见 DEVELOPMENT_PLAN,Phase 4B 后共 273 例)。
+## 17. Agent Workflow(Phase 4A 落地)
+
+```text
+User Message
+ → UNDERSTAND(实体提取)
+ → CLASSIFY_INTENT(Intent 与 Route 分离;见 §2)
+ → ROUTE
+     ├── RAG(REFUND_INQUIRY / KNOWLEDGE_QA)
+     │     → 既有 RetrievalPipeline.run(query)→ ContextPackage(结构化保存于 AgentState.retrieved_context)
+     ├── *TOOL(ORDER_STATUS / LOGISTICS_TRACKING / REFUND_REQUEST / CANCEL_ORDER / CREATE_TICKET)
+     │     → ToolRequest → ToolExecutor 执行(ToolResult 回写 AgentState;见 §18)
+     ├── CLARIFY(AMBIGUOUS / 缺订单号 / 多订单号——不猜单)
+     └── ESCALATE(UNSUPPORTED / 用户要求转人工)
+ → Response State(AgentResult)→ FINALIZE → END
+```
+
+- **AgentState / AgentResult / ToolRequest**(`backend/app/agent/state.py`):强类型 domain state,不依赖 LangGraph / FastAPI;`AgentResult`(Response State)包含 status / response / intent / route / citations / tool_requests / needs_clarification / escalation_required / error,自然语言最终回复由后续 LLM 阶段生成。(Decision 019 / 020)
+- **Intent 分类**(`backend/app/agent/intent.py`):`IntentClassifier` Protocol + `DeterministicIntentClassifier`(规则 + 优先级 + ambiguity,明确为测试实现,非生产 NLP;未来 LLM classifier 可替换,Workflow 不感知具体模型)。Intent:KNOWLEDGE_QA / ORDER_STATUS / LOGISTICS_TRACKING / REFUND_INQUIRY / REFUND_REQUEST / CANCEL_ORDER / CREATE_TICKET / UNSUPPORTED / AMBIGUOUS。
+- **实体提取**(`backend/app/agent/entities.py`):`EntityExtractor` + 确定性实现(order_id / tracking_number);多个不同订单引用不选择,交由 CLARIFY;user 身份来自会话上下文(`AgentState.user_id`),不从自由文本猜测。(Decision 023)
+- **Router**(`backend/app/agent/router.py`):`WorkflowRouter` + `RuleBasedRouter`,只决定下一步(Intent ≠ Route),不含业务规则。示例:REFUND_INQUIRY → RAG,REFUND_REQUEST → REFUND_TOOL,UNSUPPORTED → ESCALATE,AMBIGUOUS → CLARIFY。
+- **Workflow**(`backend/app/agent/workflow.py`):framework-agnostic 状态机;本阶段不引入 LangGraph(LangGraph 仍为目标编排运行时,后续经 adapter 将 `AgentState` 映射到 graph state)。RAG 分支只调用既有 `RetrievalPipeline`(`RetrievalRunner` 接口注入);业务分支创建 `ToolRequest`——未注入 ToolExecutor 时保持 Phase 4A 只规划行为,注入后经 §18 执行,Agent 层本身绝不直接访问 DB / Service。
+- **边界**:Agent 层不 import SQLAlchemy / `app.db` / `app.services` / `app.api`(架构测试固化);不调用真实 LLM;业务工具只经注入的 ToolExecutor 执行(Agent → Tool → Service → Repository → Database);MCP / 风控 / HITL 属后续 Phase。
+- **工具映射**(Phase 4B 实际执行;Phase 4A 仅接口):ORDER_STATUS→get_order、LOGISTICS_TRACKING→get_logistics、REFUND_REQUEST→check_refund_eligibility(eligible=True 才追加 create_refund;风控/HITL 属 Phase 5)、CANCEL_ORDER→cancel_order、CREATE_TICKET→create_ticket。
+- **测试**:`tests/test_agent_intent.py`、`tests/test_agent_router.py`、`tests/test_agent_workflow.py`(含真实 RetrievalPipeline 集成 + Scenario A–D);Phase 4B 另加 `tests/test_tools.py` / `tests/test_tool_executor.py` / `tests/test_agent_tool_integration.py`(见 §18)。决策记录:DECISIONS 019–031;路线:DEVELOPMENT_PLAN Phase 4A / 4B。
+## 18. Tool Execution Architecture(Phase 4B 落地)
+
+```text
+User
+ ↓
+Agent(Intent / Route → ToolRequest)
+ ↓
+Tool Registry(显式 allowlist)
+ ↓
+Tool Executor(Pydantic 校验 + trusted context + 错误归一化)
+ ↓
+Business Service(业务规则唯一归属)
+ ↓
+Repository
+ ↓
+DB
+ ↓
+ToolResult(稳定 domain schema + observability metadata)
+ ↓
+AgentState.tool_results → FINALIZE → Response State
+```
+
+- **Tool Registry**(`backend/app/tools/registry.py`):register / get / has / list;重复注册显式报错;未知工具返回稳定 `UNKNOWN_TOOL`。Registry 是安全 allowlist——禁止 `getattr` / `eval` / 动态 importlib 任意调用。
+- **ToolExecutor**(`backend/app/tools/executor.py`):查 Registry → 用 Pydantic input schema 校验参数 → 以可信 `ToolExecutionContext`(request_id / session_id / user_id)执行 handler → 任何异常归一化为 `ToolResult`。`user_id` 只来自 trusted context,模型参数中的 `user_id` 一律被覆盖,无法越权(Decision 027)。
+- **工具与授权**:六个工具(get_order / get_logistics / check_refund_eligibility / create_refund / cancel_order / create_ticket)全部经 Service 层调用;订单「存在」与「可访问」分离——跨用户查订单 / 物流 / 退款 / 取消返回 `UNAUTHORIZED_ORDER_ACCESS`(Decision 029)。
+- **业务规则边界**:退款资格、权威退款金额、取消状态机、重复退款检测、工单引用校验全部保留在 Service 层,Tool 只做输入/输出归一化与执行期授权(Decision 029)。
+- **ToolResult**(`backend/app/tools/base.py`):tool_name / status(SUCCESS / FAILED / VALIDATION_ERROR / NOT_FOUND / BUSINESS_ERROR)/ data(JSON-serializable output schema dump,不返回 ORM)/ error_code / error_message / metadata(execution_id / request_id / tool_name / duration_ms / success / requires_confirmation / risk_level)。错误码与既有业务错误对齐(ORDER_NOT_FOUND / ORDER_NOT_CANCELLABLE / DUPLICATE_REFUND …),不泄漏 traceback(Decision 030)。
+- **Refund 条件执行**:REFUND_REQUEST → `check_refund_eligibility` → 仅 eligible=True 才追加并执行 `create_refund`;ineligible / 越权不触达退款 Service。
+- **Cancellation**:`cancel_order` 继续使用现有 Service 状态机(DELIVERED / REFUNDED 不可取消、在途退款阻止取消);`requires_confirmation=True` 与 risk_level 仅作为 metadata 记录,完整 Risk Control / HITL 属 Phase 5。
+- **一次 Tool Call first**:普通请求 = 一个 ToolRequest → 一个 ToolResult(循环为数据驱动结构,未来可扩展为 Tool Call → Result → reasoning → next Tool Call;决策 Decision 031)。
+- **验证**:Phase 4B 新增 60 例测试(Registry / Validation / Authorization / 六工具 / Executor / Agent↔Tool 集成 / 端到端 DB),全套 273 例全绿;零新增依赖(Decision 025–031)。
