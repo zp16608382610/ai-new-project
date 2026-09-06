@@ -10,7 +10,7 @@
 - **Phase 2C — Business Scenario Tests:completed**
 - **Phase 3A — RAG · Knowledge Base & Ingestion:completed**
 - **Phase 3B — RAG · Retrieval:completed**
-- **Phase 3C — RAG · Reranking + Context Assembly:not started**
+- **Phase 3C — RAG · Reranking + Context Assembly:completed**
 - **Phase 3D — RAG · Knowledge Management & Integration:not started**
 - Phase 4 及以后均未开始。
 
@@ -96,18 +96,25 @@
 
 说明:⚠️ PostgreSQL / pgvector **未实机验证**(本机无 Docker);数据库级向量检索性能未测量。本地 SQLite 检索测试通过。
 
-## Phase 3C — RAG · Reranking + Context Assembly [NOT STARTED]
+## Phase 3C — RAG · Reranking + Context Assembly [COMPLETED]
 
-- Reranker(重排 dense/sparse 融合候选;检索质量层)
-- Context Assembly(为生成准备上下文窗口与格式;引用格式与溯源输出准备)
-- 检索质量基线增强(在 Phase 3B 27 条数据集基础上演进)
-- 范围与拆解将在 Phase 3C 启动时细化;LLM 生成 / Grounding / 拒答策略由其后的阶段(3D / Phase 4)承接
+已完成(内部链路:Hybrid Retrieval → Top 20 → Reranking → Top 5 → Context Assembly → Final Context;不含 LLM 生成 / Grounding):
+
+- Reranker 层 `app/retrieval/rerank.py`:`Reranker` Protocol + `DeterministicReranker`(确定性、纯标准库,**明确非语义**的「可替换 architecture + test implementation」,未来可替换为 Cross-Encoder / LLM-based / provider reranking API)。打分模型显式加权:lexical / title / section / exact-term overlap + retrieval rank component + method-diversity bonus − duplicate penalty(权重集中 `RerankWeights`;重复检测按 (document_id, content) 界定,不同版本的相同措辞不会被判重)。(Decision 015 / 018)
+- Context Assembly 层 `app/retrieval/context.py`:`ContextAssembler` 接收 reranked candidates,执行「ACTIVE 优先(防御性;同 category+title+section 组)+ 版本安全去重(chunk_id / 同文档同节同内容;不同版本不合并、历史不删除)」,按 relevance 顺序整块装入预算,输出 typed `ContextItem` / `ContextPackage`(query / items / total_items / truncated / token_budget / estimated_tokens),每项携带完整 citation 与溯源(chunk_id / document_id / source_id / title / category / version / status / section / language / content / relevance_score / retrieval_methods)。(Decision 016)
+- Token Budget:`estimate_tokens()` 为无 tokenizer 依赖的确定性近似(CJK≈1 字/token、ASCII≈4 字符/token,文档注明仅为 approximation);`ContextBudget(max_tokens=2000, reserve_tokens=…)` 完全由 context 层控制,超预算整块停止、不产生超预算 context、不截断到不可读;reserve 为未来 system/user prompt 与 answer 预留。(Decision 017)
+- 两阶段 Top-K typed config 与内部入口:`app/retrieval/pipeline.py` 的 `RetrievalPipelineConfig` 默认 retrieval_top_k=20 / rerank_top_k=5 / max_context_tokens=2000(校验 rerank_top_k ≤ retrieval_top_k);`RetrievalPipeline.run(query)` FastAPI 无关,未创建公开 customer-facing RAG 端点。
+- Grounding Boundary:Context Assembly 不编造答案、不自动补知识、不调用业务 API / 订单 / 退款 / 取消;静态知识走 RAG,动态业务事实在 Agent Phase 经 Tools 获取(见 docs/RAG_DESIGN.md)。
+- 测试:新增 `tests/test_reranking.py`(重排排序 / title / exact term / section / retrieval rank / diversity / duplicate / 空候选 / 空查询 / top_k 与 rerank_top_k ≤ retrieval_top_k / 确定性 / weights 校验)与 `tests/test_context.py`(排序 / 元数据与溯源 / token budget 与 reserve / 截断 / 去重 / ACTIVE 优先 / 多版本不合并 / DRAFT 兜底 / schema / 校验 / 端到端 retrieval→rerank→context / 零结果 typed empty),共享工厂 `tests/retrieval_factories.py`;全套 **154 例全绿**(117 + 37),零新增依赖。
+- 未实现:LLM 生成 / Grounding / 拒答策略(由 Phase 3D+ / Phase 4 承接);真实 Embedding 模型与 pgvector 仍未接入/未实测(Decision 013)。
 
 ## Phase 3D — RAG · Knowledge Management & Integration [NOT STARTED]
 
+> 下一阶段:Phase 3C 完成后进入(尚未开始)。范围:知识库管理 API / 界面(上传、版本管理、激活/归档);真实 Embedding 模型与 pgvector 的接入与实机验证(Decision 013 的后续,范围在启动时细化);与 Phase 4 Agent(Knowledge Agent)的集成边界。不实现 LLM 生成/Agent 编排。
+
 - 知识库管理 API / 管理界面(上传、版本管理、激活/归档)
 - 与 Phase 4 Agent(Knowledge Agent)的集成边界
-- 范围与拆解将在 Phase 3C 完成时细化
+- 范围与拆解将在 Phase 3D 启动时细化
 ## Phase 4 — Agent [NOT STARTED]
 
 - LLM 接入(未来集成使用 OpenAI Responses API)与对话编排(LangGraph)

@@ -18,6 +18,10 @@
 | 012 | RRF fusion | Accepted | 2026-09-06 |
 | 013 | pgvector integration strategy | Accepted | 2026-09-06 |
 | 014 | Retrieval metadata/lifecycle filtering | Accepted | 2026-09-06 |
+| 015 | Retrieval vs reranking separation | Accepted | 2026-09-06 |
+| 016 | Context assembly independence | Accepted | 2026-09-06 |
+| 017 | Token budget owned by context layer | Accepted | 2026-09-06 |
+| 018 | Deterministic reranker (architecture/test only) | Accepted | 2026-09-06 |
 
 ## Decision 001 — Static knowledge vs dynamic data
 
@@ -140,3 +144,35 @@ Filtering uses a simple typed `RetrievalFilter(status/category/language)` — no
 
 **Reason:**
 Simple, typed, and testable; lifecycle correctness (active-version-only retrieval) is enforced at the single data-access boundary instead of being re-implemented per retriever.
+
+## Decision 015 — Retrieval vs reranking separation
+
+**Decision:**
+Retrieval (candidate generation) and reranking are separate layers with separate interfaces: retrieval produces typed, traceable candidates; reranking is a pluggable pass that re-orders those candidates for the final Top-N.
+
+**Reason:**
+Retrieval optimizes recall with cheap/fast methods (dense + BM25 + RRF); reranking optimizes precision for what finally matters. Splitting the layers keeps each independently testable and lets a real Cross-Encoder / LLM-based reranker / provider reranking API replace the local implementation without touching retrieval or context assembly.
+
+## Decision 016 — Context assembly independence
+
+**Decision:**
+A dedicated context assembly layer decides what finally reaches the LLM: dedupe, ACTIVE-version preference, ordering, chunk-count cap, token budget, and per-item citation/traceability.
+
+**Reason:**
+「Retrieval 找候选,Reranker 负责相关性排序,Context Assembly 负责决定最终给模型什么」。Keeping assembly independent prevents mixing search logic with prompt construction and grounds any future generation strictly in the assembled context (Grounding Boundary).
+
+## Decision 017 — Token budget owned by the context layer
+
+**Decision:**
+Token budget lives in the context layer as a typed `ContextBudget` (max_tokens / reserve_tokens). Without a tokenizer dependency, `estimate_tokens()` is a deterministic approximation (documented as approximation, not a real tokenizer); budget numbers never scatter across callers.
+
+**Reason:**
+Centralizing the budget prevents over-budget contexts, reserves tokens for future system/user prompts and the answer, and gives one swap point for a tokenizer-backed implementation later.
+
+## Decision 018 — Deterministic reranker is architecture/test implementation only
+
+**Decision:**
+Phase 3C ships only `DeterministicReranker`, a deterministic, standard-library, lexical scoring implementation. It is explicitly NOT a semantic reranker and must not be described as one.
+
+**Reason:**
+The phase focuses on architecture and testability, not model quality. Keeping the `Reranker` interface as the swap point avoids adding heavyweight ML dependencies (transformers / torch / sentence-transformers) without a proven need; a semantic reranker can be introduced behind the same interface in a later phase.

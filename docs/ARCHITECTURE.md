@@ -1,6 +1,6 @@
 # Architecture — Enterprise AI Customer Service Agent
 
-> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入与 Phase 3B 混合检索已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
+> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索与 Phase 3C 重排 + 上下文组装已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
 
 ## 1. System Architecture
 
@@ -244,3 +244,23 @@ Query
 - **pgvector boundary**:`DenseRetriever` 为未来 pgvector 实现保留替换点;当前环境无 PostgreSQL/pgvector,数据库级向量检索与索引策略**未实测、不声称已验证**(Decision 013)。
 - **Performance**:本地 dense 路径每次查询对当前 ACTIVE 语料做确定性全量打分(O(N),开发规模可接受);`RetrievalResult.latency_ms` 记录实际耗时用于衡量。生产路径(预计算向量 + pgvector ANN 索引)待后续阶段实测。
 - **Internal API only**:只暴露 `RetrievalService.retrieve(...)`,不创建公开 customer-facing RAG 端点(Phase 4 再决定对外形态)。
+
+
+## 16. Reranking + Context Assembly Architecture(Phase 3C 落地)
+
+```text
+Retrieval 找候选 → Reranker 排序 → Context Assembly 决定最终给模型什么
+
+Hybrid Retrieval → Top 20(Candidate Set)
+ → Reranking → Top 5
+ → Context Assembly(去重 / ACTIVE 优先 / token budget / citation)
+ → Final Context(typed ContextPackage)
+ → Grounding Boundary → LLM(后续阶段)
+```
+
+- **Reranking 层**(\`app/retrieval/rerank.py\`):\`Reranker\` Protocol 为未来真实 reranker(Cross-Encoder / LLM-based / provider API)保留替换点;本阶段仅提供 \`DeterministicReranker\` —— 确定性、纯标准库的 **architecture/test implementation,明确不是语义 reranker**。打分 = lexical overlap + title bonus + section bonus + exact-term bonus + retrieval rank component + method-diversity bonus − per-document duplicate penalty;权重集中在 \`RerankWeights\`,重复检测以 (document_id, content) 为界,绝不把不同版本的相同措辞判为重复。(Decision 015 / 018)
+- **两阶段 Top-K typed config**:\`RetrievalPipelineConfig\`(retrieval_top_k=20 → rerank_top_k=5,max_context_tokens=2000 / reserve_tokens),参数不散落;校验 rerank_top_k ≤ retrieval_top_k 等。(Decision 015)
+- **Context Assembly 层**(\`app/retrieval/context.py\`):接收 reranked candidates,执行版本安全的去重(chunk_id;同文档同节同内容;不同版本不合并、不删除历史)与防御性 ACTIVE 优先(同 category+title+section 组;DRAFT/ARCHIVED 仅在该组无 ACTIVE 时兜底),再按 relevance 顺序整块装入 token budget,输出 \`ContextItem\` + \`ContextPackage\`(query / items / total_items / truncated / token_budget / estimated_tokens),每项保留 chunk_id / document_id / source_id / title / category / version / status / section / language / content / relevance_score / retrieval_methods 全量溯源。(Decision 016 / 017)
+- **Token Budget 归属**:预算与 reserve 完全由 context 层(\`ContextBudget\`)控制;无 tokenizer 依赖时用确定性近似 \`estimate_tokens()\`(CJK≈1 字/token、ASCII≈4 字符/token,文档注明仅为 approximation),超预算整块停止、绝不截断到不可读;reserve 为未来 system/user prompt 与 answer 预留。(Decision 017)
+- **Grounding Boundary**:Context Assembly 只决定「最终 Context 里有什么」;不编造答案、不自动补知识、不调用业务 API / 订单 / 退款 / 取消。静态知识走 RAG,动态业务事实在 Agent Phase 经 Tools 获取。
+- **内部入口**:\`RetrievalPipeline.run(query)\`(FastAPI 无关);本阶段不创建公开 customer-facing RAG 端点。端到端链路 Query → Hybrid Retrieval → Rerank → Context 由测试覆盖;全套 154 例全绿(SQLite)。⚠️ PostgreSQL / pgvector 仍未实机验证。
