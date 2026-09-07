@@ -170,6 +170,18 @@ def test_extractor_parses_valid_json_proposal() -> None:
     assert fake.seen[0][1] is True
 
 
+def test_canonical_order_id_supports_any_digit_length() -> None:
+    for ref in ("ORD-1", "ORD-2", "ORD-10", "ORD-100", "ORD-1001", "ORD-2001"):
+        assert canonical_order_id(ref) == ref
+    for bare in ("1", "2", "10", "100", "1001", "2001"):
+        assert canonical_order_id(bare) == f"ORD-{bare}"
+
+
+def test_canonical_order_id_rejects_non_order_references() -> None:
+    for ref in ("", "ORD-", "ORD-x", "12a", "-2", "order id"):
+        assert canonical_order_id(ref) is None
+
+
 def test_provider_name_and_model_metadata() -> None:
     provider = DeepSeekProvider(api_key=TEST_KEY, model="deepseek-reasoner")
     assert provider.provider_name == "DeepSeek"

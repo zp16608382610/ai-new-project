@@ -150,3 +150,30 @@ def test_session_history_and_run_lookup(demo_api):
     assert runs[0]["request_id"]
     detail = client.get(f"{API}/demo/runs/{runs[0]['request_id']}").json()
     assert detail["request_id"] == runs[0]["request_id"]
+
+
+def test_cancel_short_order_ref_ord2_reaches_confirmation(demo_api, monkeypatch):
+    """Regression: /demo/chat must recognize ORD-2 instead of clarifying.
+
+    Reproduces the reported runtime failure on the real HTTP + AgentWorkflow
+    path (LLM disabled so the run is offline/deterministic): the message
+    "帮我取消订单 ORD-2" must produce CANCEL_ORDER + order_id ORD-2 and stop at
+    user confirmation - never the generic clarification reply.
+    """
+    from app.core.config import Settings
+
+    monkeypatch.setattr(
+        "app.demo.service.get_settings",
+        lambda: Settings(llm_enabled=False, deepseek_api_key=""),
+    )
+    client, session = demo_api
+    run = _chat(client, "帮我取消订单 ORD-2")
+    assert run["intent"] == "CANCEL_ORDER"
+    assert run["route"] == "CANCEL_TOOL"
+    assert run["run_status"] == "WAITING_USER_CONFIRMATION"
+    assert run["entities"]["order_id"] == "ORD-2"
+    assert run["action"]["type"] == "user_confirmation"
+    session.expire_all()
+    order = session.get(Order, 2)
+    assert order is not None
+    assert order.status.value != "CANCELLED"

@@ -71,9 +71,9 @@ class DeterministicEntityExtractor:
 
     # Canonical agent-facing order reference: ORD-<digits>.
     _ORDER_ID_PATTERNS = (
-        re.compile(r"(?i)(?<![a-z0-9])(?:ORD|ORDER)[-_ ]?(\d{3,})(?![a-z0-9])"),
-        re.compile(r"订单号\s*[:：]?\s*(\d{3,})"),
-        re.compile(r"(?i)order\s*(?:number|no\.?|#)?\s*[:：]?\s*(\d{3,})"),
+        re.compile(r"(?i)(?<![a-z0-9])(?:ORD|ORDER)[-_ ]?(\d+)(?![a-z0-9])"),
+        re.compile(r"订单号\s*[:：]?\s*(\d+)"),
+        re.compile(r"(?i)order\s*(?:number|no\.?|#)?\s*[:：]?\s*(\d+)"),
     )
     # Mock carriers in the Phase 2 seed: SF / YT / ZT / ZTO ...
     _TRACKING_PATTERNS = (

@@ -28,7 +28,7 @@ from app.llm.prompts import NLU_TASK_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-_ORDER_REF_RE = re.compile(r"(?i)^(?:ORD-?)?(\d{3,})$")
+_ORDER_REF_RE = re.compile(r"(?i)^(?:ORD-?)?(\d+)$")
 _ALLOWED_INTENT_VALUES = frozenset(item.value for item in Intent)
 
 

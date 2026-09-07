@@ -113,6 +113,29 @@ def test_no_entity_is_not_guessed(extractor):
     assert entities.has_multiple_order_ids is False
 
 
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("帮我取消订单 ORD-1", "ORD-1"),
+        ("帮我取消订单 ORD-2", "ORD-2"),
+        ("帮我查订单 ORD-10 到哪了", "ORD-10"),
+        ("ORD-100 到哪里了？", "ORD-100"),
+        ("帮我取消订单 ORD-1001", "ORD-1001"),
+        ("ORD-2001 到哪里了？", "ORD-2001"),
+    ],
+)
+def test_short_and_long_order_references_extracted(extractor, message, expected):
+    entities = extractor.extract(message)
+    assert entities.order_id == expected
+    assert entities.has_multiple_order_ids is False
+
+
+def test_mixed_short_and_long_order_references_are_not_guessed(extractor):
+    entities = extractor.extract("退 ORD-1001 和 ORD-2")
+    assert entities.order_id is None
+    assert entities.has_multiple_order_ids is True
+
+
 def test_intent_result_serialization_roundtrip(classifier):
     result = classifier.classify("我要退款")
     data = result.to_dict()

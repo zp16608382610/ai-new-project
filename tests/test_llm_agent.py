@@ -174,6 +174,74 @@ def test_prompt_injection_cannot_skip_cancel_confirmation(demo_session):
     assert order_after.status.value != "CANCELLED"
 
 
+def test_llm_cancel_short_order_ref_is_recognized(demo_session):
+    session = demo_session
+    provider = ScriptedProvider([_intent_json("CANCEL_ORDER", order_id="ORD-2")])
+    components = _components(session, provider)
+    state, result = _run(components, "帮我取消订单 ORD-2")
+    assert result.status is AgentResultStatus.WAITING_USER_CONFIRMATION
+    assert result.intent is Intent.CANCEL_ORDER
+    assert state.entities.order_id == "ORD-2"
+    session.expire_all()
+    assert session.get(Order, 2).status.value != "CANCELLED"
+
+
+def test_llm_order_status_long_order_ref_runs_get_order(demo_session):
+    session = demo_session
+    provider = ScriptedProvider(
+        [
+            _intent_json("ORDER_STATUS", order_id="ORD-1001"),
+            "ORD-1001 状态正常。",
+        ]
+    )
+    components = _components(session, provider)
+    state, result = _run(components, "帮我查一下订单 ORD-1001")
+    assert result.status is AgentResultStatus.SUCCESS
+    assert result.intent is Intent.ORDER_STATUS
+    assert state.entities.order_id == "ORD-1001"
+    assert any(
+        isinstance(item, dict)
+        and item.get("tool_name") == "get_order"
+        and item.get("status") == "SUCCESS"
+        for item in state.tool_results
+    )
+
+
+def test_llm_logistics_long_order_ref_is_recognized(demo_session):
+    session = demo_session
+    provider = ScriptedProvider(
+        [
+            _intent_json("LOGISTICS_TRACKING", order_id="ORD-2001"),
+            "ORD-2001 物流信息已返回。",
+        ]
+    )
+    components = _components(session, provider)
+    state, result = _run(components, "ORD-2001 到哪里了？")
+    assert result.intent is Intent.LOGISTICS_TRACKING
+    assert state.entities.order_id == "ORD-2001"
+
+
+def test_llm_cancel_without_order_ref_clarifies(demo_session):
+    session = demo_session
+    provider = ScriptedProvider([_intent_json("CANCEL_ORDER")])
+    components = _components(session, provider)
+    state, result = _run(components, "帮我取消订单")
+    assert result.status is AgentResultStatus.NEEDS_CLARIFICATION
+    assert result.intent is Intent.CANCEL_ORDER
+    assert state.entities.order_id is None
+
+
+def test_llm_multiple_order_refs_still_clarify(demo_session):
+    session = demo_session
+    provider = ScriptedProvider([_intent_json("CANCEL_ORDER")])
+    components = _components(session, provider)
+    state, result = _run(components, "帮我取消订单 ORD-1001 和 ORD-2")
+    assert result.status is AgentResultStatus.NEEDS_CLARIFICATION
+    assert result.intent is Intent.CANCEL_ORDER
+    assert state.entities.order_id is None
+    assert state.entities.has_multiple_order_ids is True
+
+
 def test_model_cannot_execute_arbitrary_tool(demo_session):
     session = demo_session
     provider = ScriptedProvider(

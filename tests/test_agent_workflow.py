@@ -205,6 +205,35 @@ def test_cancel_order_requires_confirmation():
     assert request.arguments == {"order_id": "ORD-1001"}
 
 
+def test_cancel_order_with_short_order_ref_plans_tool():
+    workflow = AgentWorkflow()
+    state, result = workflow.execute("req-x2", "帮我取消订单 ORD-2", user_id=1)
+    assert result.status is AgentResultStatus.TOOL_REQUESTED
+    assert result.intent is Intent.CANCEL_ORDER
+    assert result.route is Route.CANCEL_TOOL
+    assert state.entities.order_id == "ORD-2"
+    (request,) = _tool_requests(result)
+    assert request.tool_name == "cancel_order"
+    assert request.requires_confirmation is True
+    assert request.arguments == {"order_id": "ORD-2"}
+
+
+def test_cancel_order_without_reference_clarifies():
+    workflow = AgentWorkflow()
+    result = workflow.run("req-cx", "帮我取消订单", user_id=1)
+    assert result.status is AgentResultStatus.NEEDS_CLARIFICATION
+    assert result.intent is Intent.CANCEL_ORDER
+    assert result.route is Route.CLARIFY
+
+
+def test_multiple_short_and_long_order_references_clarify():
+    workflow = AgentWorkflow()
+    result = workflow.run("req-mx", "帮我取消订单 ORD-1001 和 ORD-2", user_id=1)
+    assert result.status is AgentResultStatus.NEEDS_CLARIFICATION
+    assert result.intent is Intent.CANCEL_ORDER
+    assert result.route is Route.CLARIFY
+
+
 def test_create_ticket_uses_user_context():
     workflow = AgentWorkflow()
     result = workflow.run(

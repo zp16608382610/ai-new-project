@@ -43,7 +43,7 @@ NLU_TASK_INSTRUCTIONS = """你是售后客服 Agent 的「意图识别与参数�
 - “帮我退款 / 把订单退了” -> REFUND_REQUEST
 
 参数提取规则:
-- order_id: 用户明确给出的订单号(如 ORD-1001 或 1001)。没有给出就为 null。
+- order_id: 用户明确给出的订单号(位数不固定,如 ORD-2、ORD-1001、ORD-2001 或 1001)。没有给出就为 null。
 - tracking_number: 用户明确给出的运单号。没有给出就为 null。
 - 绝对不要根据猜测补全订单号。
 - 身份(用户 id)不由你提取,系统从会话中获取。
