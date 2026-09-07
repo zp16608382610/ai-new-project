@@ -24,6 +24,7 @@ Design decisions:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
 from app.agent.entities import DeterministicEntityExtractor, EntityExtractor, ExtractedEntities
@@ -35,6 +36,7 @@ from app.agent.router import RuleBasedRouter, WorkflowRouter
 from app.agent.state import (
     AgentResult,
     AgentResultStatus,
+    AgentRunStatus,
     AgentState,
     Route,
     ToolRequest,
@@ -45,6 +47,7 @@ from app.agent.state import (
 if TYPE_CHECKING:
     from app.retrieval.context import ContextPackage
 
+from app.risk.types import RiskAction, RiskContext, RiskDecision
 from app.tools.base import ToolExecutionContext, ToolResult, ToolResultStatus
 
 class RetrievalRunner(Protocol):
@@ -119,6 +122,47 @@ class ToolExecutorLike(Protocol):
         ...
 
 
+class RiskEngineLike(Protocol):
+    """Phase 5 risk evaluator (app.risk.RiskEngine satisfies it)."""
+
+    def evaluate(self, operation: str, context: RiskContext | None = None) -> RiskDecision:
+        """Classify one operation and return a RiskDecision."""
+        ...
+
+
+class ApprovalGatewayLike(Protocol):
+    """Approval persistence + resolution used by the Risk Gate.
+
+    ApprovalService (service layer) structurally satisfies this interface; the
+    agent layer never imports services directly.
+    """
+
+    def create(self, *, request_id, tool_name, tool_arguments, risk_level, reason, user_id):
+        """Persist a PENDING approval and return its id."""
+        ...
+
+    def get(self, approval_id):
+        """Return the approval view (None when not found)."""
+        ...
+
+    def approve(self, approval_id, resolved_by=None):
+        """Transition PENDING -> APPROVED."""
+        ...
+
+    def reject(self, approval_id, resolved_by=None):
+        """Transition PENDING -> REJECTED."""
+        ...
+
+
+class ToolVerifierLike(Protocol):
+    """Execute -> Verify hook. Returns None when authoritative business state
+    matches; raises an exception when verification fails."""
+
+    def verify(self, tool_name: str, data: dict) -> None:
+        """Re-check business state after a successful write tool."""
+        ...
+
+
 class AgentWorkflow:
     """Deterministic, framework-agnostic workflow orchestrator.
 
@@ -135,12 +179,18 @@ class AgentWorkflow:
         router: WorkflowRouter | None = None,
         retrieval: RetrievalRunner | None = None,
         tool_executor: ToolExecutorLike | None = None,
+        risk_engine: RiskEngineLike | None = None,
+        approval_gateway: ApprovalGatewayLike | None = None,
+        verifier: ToolVerifierLike | None = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
         self._router = router or RuleBasedRouter()
         self._retrieval = retrieval
         self._tool_executor = tool_executor
+        self._risk_engine = risk_engine
+        self._approval_gateway = approval_gateway
+        self._verifier = verifier
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -161,6 +211,18 @@ class AgentWorkflow:
     @property
     def tool_executor(self) -> ToolExecutorLike | None:
         return self._tool_executor
+    @property
+    def risk_engine(self) -> RiskEngineLike | None:
+        return self._risk_engine
+
+    @property
+    def approval_gateway(self) -> ApprovalGatewayLike | None:
+        return self._approval_gateway
+
+    @property
+    def verifier(self) -> ToolVerifierLike | None:
+        return self._verifier
+
 
     def run(
         self,
@@ -169,6 +231,7 @@ class AgentWorkflow:
         *,
         user_id: int | None = None,
         session_id: str | None = None,
+        user_confirmed: bool | None = None,
     ) -> AgentResult:
         """Run the workflow and return the Response State (AgentResult)."""
         _, result = self.execute(
@@ -176,6 +239,7 @@ class AgentWorkflow:
             user_message,
             user_id=user_id,
             session_id=session_id,
+            user_confirmed=user_confirmed,
         )
         return result
 
@@ -186,6 +250,7 @@ class AgentWorkflow:
         *,
         user_id: int | None = None,
         session_id: str | None = None,
+        user_confirmed: bool | None = None,
     ) -> tuple[AgentState, AgentResult]:
         """Run the workflow and return (AgentState, AgentResult).
 
@@ -201,7 +266,7 @@ class AgentWorkflow:
             status=WorkflowStage.START,
         )
         try:
-            result = self._execute_inner(state)
+            result = self._execute_inner(state, user_confirmed)
         except Exception as exc:  # defensive error boundary; never fabricate success
             state.error = f"{type(exc).__name__}: {exc}"
             state.status = WorkflowStage.END
@@ -214,11 +279,16 @@ class AgentWorkflow:
         state.status = WorkflowStage.FINALIZE
         state.response = result.response
         state.status = WorkflowStage.END
+        if state.run_status is AgentRunStatus.RUNNING:
+            if result.status is AgentResultStatus.SUCCESS or result.status is AgentResultStatus.TOOL_REQUESTED:
+                state.run_status = AgentRunStatus.COMPLETED
+            elif result.status is AgentResultStatus.ERROR:
+                state.run_status = AgentRunStatus.FAILED
         return state, result
 
     # -- internals ----------------------------------------------------------
 
-    def _execute_inner(self, state: AgentState) -> AgentResult:
+    def _execute_inner(self, state: AgentState, *, user_confirmed: bool | None = None) -> AgentResult:
         state.status = WorkflowStage.UNDERSTAND
         entities = self._entity_extractor.extract(state.user_message)
         state.entities = entities
@@ -240,7 +310,7 @@ class AgentWorkflow:
         if decision.route is Route.RAG:
             return self._run_rag(state)
         if decision.route in _ROUTE_TOOL_SPEC:
-            return self._run_tool_branch(state)
+            return self._run_tool_branch(state, user_confirmed=user_confirmed)
         if decision.route is Route.CLARIFY:
             state.status = WorkflowStage.CLARIFY
             return AgentResult(
@@ -278,7 +348,7 @@ class AgentWorkflow:
             citations=citations,
         )
 
-    def _run_tool_branch(self, state: AgentState) -> AgentResult:
+    def _run_tool_branch(self, state: AgentState, *, user_confirmed: bool | None = None) -> AgentResult:
         """Plan (and, when an executor is injected, execute) business tools.
 
         Phase 4A compatibility: without a ToolExecutor the branch only plans
@@ -299,7 +369,9 @@ class AgentWorkflow:
                 route=state.route,
                 tool_requests=(request,),
             )
-        return self._execute_tool_plan(state, [request])
+        if self._risk_engine is None:
+            return self._execute_tool_plan(state, [request])
+        return self._execute_risk_gated(state, [request], user_confirmed=user_confirmed)
 
     # -- Phase 4B: tool execution ------------------------------------------
 
@@ -359,12 +431,281 @@ class AgentWorkflow:
             user_id=state.user_id,
         )
         assert self._tool_executor is not None
-        return self._tool_executor.execute(
-            request.tool_name,
-            request.arguments,
-            context,
-            requires_confirmation=request.requires_confirmation,
+
+    # -- Phase 5: Risk Gate -----------------------------------------------
+
+    def _execute_risk_gated(
+        self,
+        state: AgentState,
+        requests: list[ToolRequest],
+        *,
+        user_confirmed: bool | None = None,
+    ) -> AgentResult:
+        """ToolRequest -> Risk Engine -> Risk Gate -> Tool Executor -> Verify.
+
+        LOW:        AUTO_EXECUTE (run immediately).
+        MEDIUM:     USER_CONFIRM -> WAITING_USER_CONFIRMATION until the user
+                    confirms; confirmed=True executes, confirmed=False rejects.
+        HIGH / CRITICAL: HUMAN_APPROVAL -> a PENDING approval is persisted and
+                    the run stops with WAITING_HUMAN_APPROVAL. resume_after_
+                    approval() later resumes the ORIGINAL ToolRequest.
+        """
+        plan = list(requests)
+        processed: list[ToolRequest] = []
+        results: list[ToolResult] = []
+        while plan:
+            request = plan.pop(0)
+            state.status = WorkflowStage.TOOL_EXECUTION
+            decision = self._evaluate_risk(state, request, results)
+            if decision.action is RiskAction.AUTO_EXECUTE:
+                stop = self._execute_auto_or_confirmed(state, request, processed, results)
+                if stop is not None:
+                    return stop
+                if (
+                    processed[-1].tool_name == "check_refund_eligibility"
+                    and results[-1].status is ToolResultStatus.SUCCESS
+                    and bool(results[-1].data.get("eligible"))
+                ):
+                    plan.append(_plan_refund_execution_request(state))
+                continue
+            if decision.action is RiskAction.USER_CONFIRM:
+                if user_confirmed is None:
+                    return self._wait_user_confirmation(state, request, processed, results)
+                if user_confirmed is False:
+                    pending = replace(request)  # stays PENDING: never executed
+                    state.tool_requests = tuple(processed) + (pending,)
+                    state.run_status = AgentRunStatus.REJECTED
+                    return AgentResult(
+                        status=AgentResultStatus.REJECTED,
+                        intent=state.intent,
+                        route=state.route,
+                        tool_requests=tuple(processed) + (pending,),
+                        confirmation_message=_confirmation_message(request),
+                    )
+                stop = self._execute_auto_or_confirmed(state, request, processed, results)
+                if stop is not None:
+                    return stop
+                continue
+            if decision.action is RiskAction.HUMAN_APPROVAL:
+                return self._wait_human_approval(state, request, decision, processed, results)
+            # RiskAction.BLOCK: operations without a policy rule never execute.
+            pending = replace(request)
+            state.tool_requests = tuple(processed) + (pending,)
+            state.run_status = AgentRunStatus.FAILED
+            return AgentResult(
+                status=AgentResultStatus.ERROR,
+                intent=state.intent,
+                route=state.route,
+                tool_requests=tuple(processed) + (pending,),
+                error=f"Operation blocked by risk policy: {decision.reason}",
+            )
+        state.run_status = AgentRunStatus.COMPLETED
+        return AgentResult(
+            status=AgentResultStatus.SUCCESS,
+            intent=state.intent,
+            route=state.route,
+            tool_requests=tuple(processed),
         )
+
+    def _evaluate_risk(
+        self, state: AgentState, request: ToolRequest, results: list[ToolResult]
+    ) -> RiskDecision:
+        """Build the business context (never user-controlled) and ask the engine."""
+        refund_amount = None
+        if request.tool_name == "create_refund":
+            for item in results:
+                if item.tool_name == "check_refund_eligibility":
+                    amount = item.data.get("refund_amount")
+                    if amount is not None:
+                        refund_amount = Decimal(str(amount))
+                    break
+        context = RiskContext(
+            request_id=state.request_id,
+            user_id=state.user_id,
+            refund_amount=refund_amount,
+        )
+        return self._risk_engine.evaluate(request.tool_name, context)
+
+    def _execute_auto_or_confirmed(
+        self,
+        state: AgentState,
+        request: ToolRequest,
+        processed: list[ToolRequest],
+        results: list[ToolResult],
+    ) -> AgentResult | None:
+        """Run one gated request through the executor and verify when needed."""
+        result = self._execute_one_tool(state, request)
+        request = replace(
+            request,
+            status=ToolRequestStatus.EXECUTED if result.success else ToolRequestStatus.FAILED,
+        )
+        processed.append(request)
+        results.append(result)
+        state.tool_requests = tuple(processed)
+        state.tool_results = tuple(item.to_dict() for item in results)
+        if not result.success:
+            state.run_status = AgentRunStatus.FAILED
+            return AgentResult(
+                status=AgentResultStatus.ERROR,
+                intent=state.intent,
+                route=state.route,
+                tool_requests=tuple(processed),
+                error=result.error_message or f"Tool {result.tool_name} failed: {result.status.value}",
+            )
+        if self._verifier is not None and request.tool_name in ("create_refund", "cancel_order"):
+            try:
+                self._verifier.verify(request.tool_name, result.data)
+            except Exception as exc:  # any verify failure ends the run
+                state.run_status = AgentRunStatus.VERIFICATION_FAILED
+                return AgentResult(
+                    status=AgentResultStatus.VERIFICATION_FAILED,
+                    intent=state.intent,
+                    route=state.route,
+                    tool_requests=tuple(processed),
+                    error=f"Verification failed: {exc}",
+                )
+        return None
+
+    def _wait_user_confirmation(
+        self,
+        state: AgentState,
+        request: ToolRequest,
+        processed: list[ToolRequest],
+        results: list[ToolResult],
+    ) -> AgentResult:
+        pending = replace(request)
+        state.tool_requests = tuple(processed) + (pending,)
+        state.tool_results = tuple(item.to_dict() for item in results)
+        state.run_status = AgentRunStatus.WAITING_USER_CONFIRMATION
+        return AgentResult(
+            status=AgentResultStatus.WAITING_USER_CONFIRMATION,
+            intent=state.intent,
+            route=state.route,
+            tool_requests=tuple(processed) + (pending,),
+            confirmation_message=_confirmation_message(request),
+        )
+
+    def _wait_human_approval(
+        self,
+        state: AgentState,
+        request: ToolRequest,
+        decision: RiskDecision,
+        processed: list[ToolRequest],
+        results: list[ToolResult],
+    ) -> AgentResult:
+        if self._approval_gateway is None:
+            state.run_status = AgentRunStatus.FAILED
+            return AgentResult(
+                status=AgentResultStatus.ERROR,
+                intent=state.intent,
+                route=state.route,
+                error=(
+                    "Human approval is required but no approval gateway is configured."
+                ),
+            )
+        approval_id = self._approval_gateway.create(
+            request_id=state.request_id,
+            tool_name=request.tool_name,
+            tool_arguments=dict(request.arguments),
+            risk_level=decision.risk_level.value,
+            reason=decision.reason,
+            user_id=state.user_id,
+        )
+        pending = replace(request)
+        state.tool_requests = tuple(processed) + (pending,)
+        state.tool_results = tuple(item.to_dict() for item in results)
+        state.run_status = AgentRunStatus.WAITING_HUMAN_APPROVAL
+        return AgentResult(
+            status=AgentResultStatus.WAITING_HUMAN_APPROVAL,
+            intent=state.intent,
+            route=state.route,
+            tool_requests=tuple(processed) + (pending,),
+            approval_id=approval_id,
+        )
+
+    def resume_after_approval(
+        self,
+        approval_id: int,
+        *,
+        approved: bool,
+        resolved_by: str | None = None,
+    ) -> tuple[AgentState, AgentResult]:
+        """Resume the ORIGINAL ToolRequest bound to an approval.
+
+        approve -> resolve -> Tool Executor -> Verify (snapshot is executed);
+        reject  -> REJECTED, nothing is executed. Arguments are never re-planned.
+        """
+        if self._approval_gateway is None:
+            return self._resume_error(approval_id, "No approval gateway is configured.")
+        view = self._approval_gateway.get(approval_id)
+        if view is None:
+            return self._resume_error(approval_id, "Approval request not found.")
+        try:
+            if approved:
+                self._approval_gateway.approve(approval_id, resolved_by)
+            else:
+                self._approval_gateway.reject(approval_id, resolved_by)
+        except Exception as exc:  # already resolved / invalid transition
+            return self._resume_error(approval_id, str(exc))
+
+        view = self._approval_gateway.get(approval_id)
+        state = AgentState(
+            request_id=view.request_id or f"resume-{approval_id}",
+            user_message="",
+            user_id=view.user_id,
+        )
+        state.status = WorkflowStage.TOOL_EXECUTION
+        if not approved:
+            state.run_status = AgentRunStatus.REJECTED
+            return state, AgentResult(
+                status=AgentResultStatus.REJECTED,
+                route=state.route,
+                tool_requests=(),
+            )
+        request = ToolRequest(
+            tool_name=view.tool_name,
+            arguments=dict(view.tool_arguments),
+            reason="Approved by human; resuming the original ToolRequest snapshot.",
+            requires_confirmation=False,
+        )
+        processed: list[ToolRequest] = []
+        results: list[ToolResult] = []
+        stop = self._execute_auto_or_confirmed(state, request, processed, results)
+        if stop is not None:
+            return state, stop
+        state.run_status = AgentRunStatus.COMPLETED
+        return state, AgentResult(
+            status=AgentResultStatus.SUCCESS,
+            route=state.route,
+            tool_requests=tuple(processed),
+        )
+
+    def _resume_error(self, approval_id: int, message: str) -> tuple[AgentState, AgentResult]:
+        state = AgentState(request_id=f"resume-{approval_id}", user_message="")
+        state.run_status = AgentRunStatus.FAILED
+        return state, AgentResult(
+            status=AgentResultStatus.ERROR,
+            error=message,
+        )
+
+
+def _display_order_ref(arguments: dict) -> str:
+    """Render an order reference for user-facing confirmation messages."""
+    value = (arguments or {}).get("order_id")
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.upper().startswith("ORD"):
+        return text
+    return f"ORD-{text}"
+
+
+def _confirmation_message(request: ToolRequest) -> str:
+    """Message shown before a MEDIUM (USER_CONFIRM) action executes."""
+    ref = _display_order_ref(request.arguments)
+    if not ref:
+        return "该操作需要您确认后才能执行，请确认是否继续？"
+    return f"取消订单 {ref} 将导致订单进入取消状态，请确认是否继续？"
 
 
 def _plan_tool_request(state: AgentState, spec: ToolSpec) -> ToolRequest:

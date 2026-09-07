@@ -46,3 +46,10 @@ class InvalidOperationError(BusinessError):
 class ConflictError(BusinessError):
     http_status = 409
     code = "CONFLICT"
+
+
+class VerificationFailedError(BusinessError):
+    """Execute->Verify: authoritative DB state contradicts the tool result."""
+
+    http_status = 422
+    code = "VERIFICATION_FAILED"

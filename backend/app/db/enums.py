@@ -57,3 +57,11 @@ class KnowledgeStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     ACTIVE = "ACTIVE"
     ARCHIVED = "ARCHIVED"
+
+
+class ApprovalStatus(str, enum.Enum):
+    """Approval request lifecycle for human-in-the-loop operations."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"

@@ -89,6 +89,17 @@ class ToolRequestStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class AgentRunStatus(str, enum.Enum):
+    """Phase 5 run-level lifecycle for one workflow execution."""
+
+    RUNNING = "RUNNING"
+    WAITING_USER_CONFIRMATION = "WAITING_USER_CONFIRMATION"
+    WAITING_HUMAN_APPROVAL = "WAITING_HUMAN_APPROVAL"
+    COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"
+
 class AgentResultStatus(str, enum.Enum):
     """High-level outcome of one workflow run (Response State)."""
 
@@ -97,6 +108,10 @@ class AgentResultStatus(str, enum.Enum):
     NEEDS_CLARIFICATION = "needs_clarification"
     ESCALATION_REQUIRED = "escalation_required"
     ERROR = "error"
+    WAITING_USER_CONFIRMATION = "waiting_user_confirmation"
+    WAITING_HUMAN_APPROVAL = "waiting_human_approval"
+    REJECTED = "rejected"
+    VERIFICATION_FAILED = "verification_failed"
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,7 @@ class ToolRequest:
             "reason": self.reason,
             "requires_confirmation": self.requires_confirmation,
             "status": self.status.value,
+            "run_status": self.run_status.value,
         }
 
     @classmethod
@@ -158,6 +174,8 @@ class AgentResult:
     needs_clarification: bool = False
     escalation_required: bool = False
     error: str | None = None
+    approval_id: int | None = None
+    confirmation_message: str | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -170,6 +188,8 @@ class AgentResult:
             "needs_clarification": self.needs_clarification,
             "escalation_required": self.escalation_required,
             "error": self.error,
+            "approval_id": self.approval_id,
+            "confirmation_message": self.confirmation_message,
         }
 
     @classmethod
@@ -186,6 +206,8 @@ class AgentResult:
             needs_clarification=bool(data.get("needs_clarification", False)),
             escalation_required=bool(data.get("escalation_required", False)),
             error=data.get("error"),
+            approval_id=data.get("approval_id"),
+            confirmation_message=data.get("confirmation_message"),
         )
 
 
@@ -213,6 +235,7 @@ class AgentState:
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
+    run_status: AgentRunStatus = AgentRunStatus.RUNNING
 
     def to_dict(self) -> JsonDict:
         entities: JsonDict | None = None
@@ -244,6 +267,7 @@ class AgentState:
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
+            "run_status": self.run_status.value,
         }
 
     @classmethod
@@ -265,6 +289,7 @@ class AgentState:
             response=data.get("response"),
             error=data.get("error"),
             status=WorkflowStage(str(data.get("status", WorkflowStage.START.value))),
+            run_status=AgentRunStatus(str(data.get("run_status", AgentRunStatus.RUNNING.value))),
         )
         entities_data = data.get("entities")
         if isinstance(entities_data, dict):

@@ -6,8 +6,9 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.enums import KnowledgeCategory, KnowledgeStatus, OrderStatus, RefundStatus
+from app.db.enums import ApprovalStatus, KnowledgeCategory, KnowledgeStatus, OrderStatus, RefundStatus
 from app.db.models import (
+    ApprovalRequest,
     KnowledgeChunk,
     KnowledgeDocument,
     Logistics,
@@ -218,4 +219,18 @@ class KnowledgeChunkRepository(BaseRepository):
         if language is not None:
             stmt = stmt.where(KnowledgeDocument.language == language)
         stmt = stmt.order_by(KnowledgeDocument.id, KnowledgeChunk.chunk_index)
+        return list(self._session.scalars(stmt))
+class ApprovalRepository(BaseRepository):
+    """Repository for approval_requests (Phase 5 MVP)."""
+
+    model = ApprovalRequest
+
+    def get_pending(self, *, limit: int = 100) -> list[ApprovalRequest]:
+        """Approvals still waiting for a human decision (newest first)."""
+        stmt = (
+            select(ApprovalRequest)
+            .where(ApprovalRequest.status == ApprovalStatus.PENDING)
+            .order_by(ApprovalRequest.id.desc())
+            .limit(limit)
+        )
         return list(self._session.scalars(stmt))

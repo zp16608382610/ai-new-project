@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import health, orders, refunds, tickets, users
+from app.api.routes import approvals, health, orders, refunds, tickets, users
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.services.errors import BusinessError
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     application.include_router(users.router, prefix=settings.api_v1_prefix)
     application.include_router(refunds.router, prefix=settings.api_v1_prefix)
     application.include_router(tickets.router, prefix=settings.api_v1_prefix)
+    application.include_router(approvals.router, prefix=settings.api_v1_prefix)
     _register_exception_handlers(application)
     return application
 
