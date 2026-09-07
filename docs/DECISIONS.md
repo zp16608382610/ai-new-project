@@ -35,6 +35,14 @@
 | 029 | Tools do not carry business rules | Accepted | 2026-09-06 |
 | 030 | ToolResult uses stable domain schemas | Accepted | 2026-09-06 |
 | 031 | Phase 4B executes one tool call first (refund = eligibility + conditional refund) | Accepted | 2026-09-06 |
+| 032 | Risk Engine is pure and policy-driven | Accepted | 2026-09-06 |
+| 033 | Refund execution defaults to Human Approval | Accepted | 2026-09-06 |
+| 034 | Approval binds the original ToolRequest and resumes its snapshot | Accepted | 2026-09-06 |
+| 035 | Execute → Verify re-checks authoritative business state | Accepted | 2026-09-06 |
+| 036 | Refund amount is never user- or agent-controlled | Accepted | 2026-09-06 |
+| 037 | Internal Tools and MCP Tools coexist | Accepted | 2026-09-07 |
+| 038 | MCP never bypasses Risk Control (no refund/cancel over MCP) | Accepted | 2026-09-07 |
+| 039 | MCP errors are normalized into internal ToolResult | Accepted | 2026-09-07 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -405,3 +413,43 @@ execution.
 **Reason:**
 Neither the end user nor the model can influence financial amounts; there is one
 authoritative computation of the refund amount.
+
+## Decision 037 — Internal Tools and MCP Tools coexist
+
+**Decision:**
+Phase 6 exposes only three MCP tools over a local stdio MCP Server:
+`get_order` / `get_logistics` / `create_ticket`. Refund, cancel and eligibility
+keep running through the existing internal Tool Executor behind the Risk Gate.
+The Agent sees a single tool-provider interface (`MCPToolAdapter`) that forwards
+MCP-exposed tools to the MCP Client and everything else to the internal
+executor.
+
+**Reason:**
+MCP adds standardization, tool discovery and provider decoupling; it is not a
+Tool Calling replacement and does not justify rewriting an executor already
+validated with Risk Control + Human-in-the-loop (Phase 5).
+
+## Decision 038 — MCP never bypasses Risk Control (no refund/cancel over MCP)
+
+**Decision:**
+MCP exposes no refund or cancel tool, and its handlers never perform risk
+evaluation or approval. The Risk Engine runs before any tool-provider call, and
+MCP tool handlers go `Service → Repository → DB` only (never raw business SQL);
+`user_id` comes from the trusted adapter context, and cross-user order access is
+rejected.
+
+**Reason:**
+High-risk operations must keep their Risk + Human Approval path; a simple MCP
+refund tool would let a client bypass Phase 5, which the architecture must
+prevent by construction.
+
+## Decision 039 — MCP errors are normalized into the internal ToolResult vocabulary
+
+**Decision:**
+The MCP Client maps unknown tool / invalid arguments / server error / malformed
+result into internal `ToolResult` statuses with stable `MCP_*` codes; raw MCP
+SDK exceptions never reach the Agent layer.
+
+**Reason:**
+Keeps Agent and observability / evaluation consumers on one error contract
+regardless of transport (internal executor or MCP).

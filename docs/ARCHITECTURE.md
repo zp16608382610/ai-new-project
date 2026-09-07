@@ -1,6 +1,6 @@
 # Architecture — Enterprise AI Customer Service Agent
 
-> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索、Phase 3C 重排 + 上下文组装与 Phase 4A Agent Workflow 骨架、Phase 4B Tool Execution 已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
+> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索、Phase 3C 重排 + 上下文组装、Phase 4A Agent Workflow 骨架、Phase 4B Tool Execution、Phase 5 Risk Control + Human-in-the-loop 与 Phase 6 MCP MVP 已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
 
 ## 1. System Architecture
 
@@ -70,9 +70,10 @@ Query
 
 ## 5. MCP
 
-- 提供 Customer Service MCP Server,统一暴露售后域工具与上下文。
+- 提供 Customer Service MCP Server(`ecommerce-customer-service`),统一暴露售后域工具与上下文。
 - 通过 MCP 标准化工具/上下文暴露;Agent 编排与业务工具服务解耦。
 - **MCP 不负责 Agent decision logic**:决策(要不要调用、风险多高、怎么回复)在 Orchestrator 层完成。
+- Phase 6 MVP 落地:本地 stdio MCP Server 只暴露 `get_order` / `get_logistics` / `create_ticket`;`create_refund` / `cancel_order` 等高危操作保留在内部 Tool Executor + Risk Gate,不通过 MCP 暴露(见 §20 与 docs/MCP.md)。
 
 ## 6. Risk
 
@@ -356,3 +357,46 @@ Verify(重查权威业务状态 → Final Response)
 - **金额边界**:退款金额只由 Service 从订单权威金额推导;工具输入 schema 不收 amount;RiskContext 只承载 Service 查询出的金额用于分级(Decision 036)。
 - **Run 状态**:AgentRunStatus 增 WAITING_USER_CONFIRMATION / WAITING_HUMAN_APPROVAL / REJECTED / VERIFICATION_FAILED,与 AgentResultStatus 一一对应(可观测、可测试)。
 - **验证**:新增 40 例测试(risk / risk_gate / approval_api / approval_flow),全套 313 例全绿;compileall 通过;零新增依赖。详情见 docs/RISK_CONTROL.md。
+
+
+## 20. MCP Integration(Phase 6 落地)
+
+Phase 6 在既有 Tool Execution(§18)与 Risk Control / HITL(§19)之上叠加标准化工具暴露,不推翻任何既有组件。
+
+Internal Tool(非 MCP):
+
+```text
+Agent
+ ↓
+Tool Registry → Tool Executor
+ ↓
+Business Service(业务规则唯一归属)
+ ↓
+Repository → DB
+```
+
+MCP Tool:
+
+```text
+Agent
+ ↓
+Tool Provider(MCPToolAdapter)
+ ↓
+MCP Client(stdio,list_tools / call_tool)
+ ↓
+MCP Server(ecommerce-customer-service)
+ ↓
+Business Service(业务规则唯一归属)
+ ↓
+Repository → DB
+```
+
+共同点:两条路径最终都进入 Service 层——业务规则唯一归属不变(Decision 029)。
+
+- **只暴露 3 个 MCP Tool**:`get_order` / `get_logistics` / `create_ticket`;其余工具(REFUND / CANCEL / eligibility)继续走内部 Tool Executor。
+- **Risk Gate 先于 MCP**:Workflow 先经 RiskEngine 分级,再把执行交给 tool provider;adapter 只在 LOW / 已确认 / 已审批后才可能触达 MCP Client——MCP 不能绕过 Phase 5。
+- **Refund / Cancel 不通过 MCP**:MCP 没有 `create_refund` / `cancel_order` / `check_refund_eligibility`;资金字段被 schema 排除,越权访问被授权检查拒绝(Decision 038)。
+- **服务边界**:MCP Tool handler → Service → Repository → DB;handler 不直接写业务 SQL;业务失败以 JSON envelope 返回,服务端异常由兜底边界归一化,不泄漏内部细节。
+- **错误归一化**:MCP Client 把 tool not found / invalid arguments / server error / malformed result 映射为内部 `ToolResult`(status + `MCP_*` 错误码),SDK exception 不进入 Agent 层(Decision 039)。
+- **实现**:`backend/app/mcp/`(tools.py / server.py / client.py / adapter.py);stdio 本地传输;一次调用一条短生命周期连接;仅新增官方依赖 `mcp==2.1.1`(Python 3.13.14 兼容)。
+- **验证**:新增 24 例 MCP 测试(server 6 / client 10 / adapter 8),全套 337 例全绿;`compileall` 通过。详见 docs/MCP.md。

@@ -15,8 +15,8 @@
 - **Phase 4A — Agent · Workflow(State / Intent / Routing / RAG branch / ToolRequest interface):completed**
 - **Phase 4B — Agent · Tool Execution:completed**(工具执行框架与售后域工具接入完成,原「Phase 5 — Tools」范围并入)
 - **Phase 5 — Risk Control + Human-in-the-loop:completed**
-- **Phase 6 — MCP:not started**(下一阶段)
-- **Phase 7 — Evaluation + Observability:not started**
+- **Phase 6 — MCP:completed**(MCP MVP:内部 Tool Executor + MCP 工具并存;只暴露 get_order / get_logistics / create_ticket)
+- **Phase 7 — Evaluation + Observability:not started**(下一阶段)
 - **Phase 8 — Final Demo:not started**
 
 ## Phase 1 — Foundation [COMPLETED]
@@ -159,10 +159,21 @@
 
 说明:Phase 5 风控 / HITL 接入点位于 Agent 工具执行路径(workflow 注入 RiskEngine / ApprovalGateway / Verifier);Phase 2B 的直连 Mock HTTP API 保持原样。Direct refund 仍只创建 PENDING 退款申请,不执行资金操作。
 
-## Phase 6 — MCP [NOT STARTED]
+## Phase 6 — MCP [COMPLETED]
 
-- Customer Service MCP Server:标准化暴露工具/上下文
-- MCP 网关与权限边界(MCP 不负责 Agent decision logic)
+已完成(Phase 6 MCP MVP;仅本地 stdio + 官方 MCP Python SDK,不引入多 Server / Gateway / 认证 / remote / Redis / Kafka / Service Mesh):
+
+- **目标区分**:Tool Calling(模型如何选择与调用工具)≠ MCP(工具能力如何以标准化协议暴露与发现);MCP 不是 Tool Calling 的替代品(见 docs/MCP.md)。
+- **MCP Server**(backend/app/mcp/server.py):官方 SDK `MCPServer("ecommerce-customer-service")`,仅注册 `get_order` / `get_logistics` / `create_ticket`;`if __name__ == "__main__"` 走 stdio(`run_stdio_async`)。
+- **MCP Client**(backend/app/mcp/client.py):最小 stdio client——list_tools 得到 name / description / input schema,call_tool 返回 JSON envelope;错误统一映射为内部 ToolResult(`MCP_TOOL_NOT_FOUND` / `MCP_INVALID_ARGUMENTS` / `MCP_SERVER_ERROR` / `MCP_MALFORMED_RESULT`),SDK exception 不进入 Agent 层。
+- **Agent 集成**(backend/app/mcp/adapter.py):`MCPToolAdapter` 作为单一 tool-provider——ORDER_STATUS → MCP get_order、LOGISTICS_TRACKING → MCP get_logistics、CREATE_TICKET → MCP create_ticket;REFUND / CANCEL / eligibility 仍走内部 Tool Executor。
+- **Risk Gate 不被绕过**:RiskEngine 先于 adapter 执行;MCP 无 refund / cancel 工具,refund 仍创建 PENDING 审批等人工,approve 后走内部执行(测试断言不触达 MCP client)。
+- **Service 边界**:MCP Tool handler → Service → Repository → DB;不直接操作业务 SQL;跨用户访问返回 `UNAUTHORIZED_ORDER_ACCESS`;schema 不含 refund_amount / amount。
+- **依赖**:仅新增官方 `mcp==2.1.1`(MCP 2.x `MCPServer`,非旧版 FastMCP 名称;Python 3.13.14 验证)。
+- **测试**:新增 24 例(server 6 / client 10 / adapter 8),全套 337 例全绿;backend compileall 通过。
+- **文档**:新增 docs/MCP.md;ARCHITECTURE.md §20、DECISIONS.md 037-039、README.md 已同步。
+
+说明:Phase 6 不做 MCP refund / cancel / auth / gateway / remote / 多 server;不进入 Phase 7。
 
 ## Phase 7 — Evaluation + Observability [NOT STARTED]
 
