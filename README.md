@@ -1,6 +1,6 @@
 # Enterprise AI Customer Service Agent
 
-企业级 AI 电商售后客服 Agent。规划能力(RAG 已落地 Phase 3A 知识入库、Phase 3B 本地混合检索与 Phase 3C 本地重排 + 上下文组装;Phase 4A Agent Workflow 骨架与 Phase 4B Tool Execution(Agent → Tool → Service → Repository → Database)已落地;**LLM 对话编排 / 风控 / HITL / MCP / 评测与其余能力尚未实现**;见 docs/DEVELOPMENT_PLAN.md):
+企业级 AI 电商售后客服 Agent。规划能力(RAG 已落地 Phase 3A 知识入库、Phase 3B 本地混合检索与 Phase 3C 本地重排 + 上下文组装;Phase 4A Agent Workflow 骨架与 Phase 4B Tool Execution(Agent → Tool → Service → Repository → Database)已落地;Phase 5 已实现**Risk Control + Human-in-the-loop**;**LLM 对话编排 / MCP / 评测 / Observability 与其余能力尚未实现**;见 docs/DEVELOPMENT_PLAN.md):
 
 - Agent
 - RAG
@@ -13,15 +13,15 @@
 
 ## Current Phase
 
-**Phase 4B – Agent · Tool Execution completed**
+**Phase 5 – Risk Control + Human-in-the-loop completed**
 
-Phase 1(Foundation)、Phase 2A(数据层)、Phase 2B(Mock Business API)、Phase 2C(Business Scenario Tests)、Phase 3A(知识库接入)、Phase 3B(混合检索)、Phase 3C(Reranking + Context Assembly)、Phase 4A(Agent Workflow 骨架)与 Phase 4B(Tool Execution)已完成。当前状态:FastAPI 骨架、7 张 Mock 业务表 + 订单 / 物流 / 退款 / 取消 / 工单 HTTP API、Repository / Service 分层与场景化测试;知识库 `knowledge_documents` / `knowledge_chunks`(Alembic 迁移 `018c7c0772c7`)+ 入库管线;检索层 `app/retrieval/`:**Query Processing → Dense + BM25 → RRF Fusion → Candidate Set → Reranking → Context Assembly → Final Context**(内部 `RetrievalPipeline`,无公开 RAG 端点);Agent 层 `app/agent/`(Intent / Route / Workflow)与工具层 `app/tools/`(Tool Registry → Tool Executor → Service → Repository → Database,六个售后工具 + Pydantic 校验 + trusted user_id 授权 + 统一 ToolResult)。检索默认只取 ACTIVE 版本(退款 v1/v2 已测试);支持 category / language / status typed 过滤;27 条确定性检索数据集 + rerank/context 单元与端到端用例。**LLM 生成 / Grounding 尚未实现**(由 Phase 3D+ / 后续 Agent 阶段承接);`DeterministicReranker` 是「可替换架构 + 确定性测试实现」而非语义模型;Context 受 token budget(默认 2000,支持 reserve)控制并保留 citation/溯源;真实 Embedding 模型与 pgvector 未接入/未实测。
+Phase 1(Foundation)、Phase 2A(数据层)、Phase 2B(Mock Business API)、Phase 2C(Business Scenario Tests)、Phase 3A(知识库接入)、Phase 3B(混合检索)、Phase 3C(Reranking + Context Assembly)、Phase 4A(Agent Workflow 骨架)、Phase 4B(Tool Execution)与 Phase 5(Risk Control + Human-in-the-loop)已完成。当前状态:FastAPI 骨架、7 张 Mock 业务表 + 订单 / 物流 / 退款 / 取消 / 工单 HTTP API、Repository / Service 分层与场景化测试;知识库 `knowledge_documents` / `knowledge_chunks`(Alembic 迁移 `018c7c0772c7`)+ 入库管线;检索层 `app/retrieval/`:**Query Processing → Dense + BM25 → RRF Fusion → Candidate Set → Reranking → Context Assembly → Final Context**(内部 `RetrievalPipeline`,无公开 RAG 端点);Agent 层 `app/agent/`(Intent / Route / Workflow)与工具层 `app/tools/`(Tool Registry → Tool Executor → Service → Repository → Database,六个售后工具 + Pydantic 校验 + trusted user_id 授权 + 统一 ToolResult)。Phase 5 在 Agent 工具执行路径接入风险门:Risk Engine 分级(LOW / MEDIUM / HIGH / CRITICAL)+ Risk Gate(取消需用户确认、退款默认人工审批)+ approval_requests 审批表 + /api/v1/approvals 审批 API + Resume 原 ToolRequest + Execute→Verify(详见 docs/RISK_CONTROL.md)。检索默认只取 ACTIVE 版本(退款 v1/v2 已测试);支持 category / language / status typed 过滤;27 条确定性检索数据集 + rerank/context 单元与端到端用例。**LLM 生成 / Grounding 尚未实现**(由 Phase 3D+ / 后续 Agent 阶段承接);`DeterministicReranker` 是「可替换架构 + 确定性测试实现」而非语义模型;Context 受 token budget(默认 2000,支持 reserve)控制并保留 citation/溯源;真实 Embedding 模型与 pgvector 未接入/未实测。
 
 ## Next Phase
 
-**Phase 5 – Risk Control + Human-in-the-loop(not started)**
+**Phase 6 – MCP(not started)**
 
-把 Phase 4B 的 Tool Execution 接到风控与人工审批:按风险分级(LOW / MEDIUM / HIGH / CRITICAL)处置高风险操作,Interrupt → Approval → Resume;原「Phase 5 — Tools」的 Tool Calling 执行框架已在 Phase 4B 内完成。另注:Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
+Customer Service MCP Server:标准化暴露工具 / 上下文,并保持 MCP 不负责 Agent decision logic。Risk Control + Human-in-the-loop 已在 Phase 5 完成(见 docs/RISK_CONTROL.md);原「Phase 5 — Tools」的 Tool Calling 执行框架已在 Phase 4B 内完成。另注:Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
 ## 目录结构
 
 ```text
@@ -145,11 +145,11 @@ npm run dev
 backend/.venv/Scripts/python -m pytest tests -v
 ```
 
-后端测试覆盖:health(HTTP 200)、Phase 2A 数据层(FK 约束、状态列 CHECK、seed 确定性与业务断言)、Phase 2B Mock Business API(订单/物流/退款/取消/工单与 Repository 边界)、Phase 2C 业务场景(工作流、跨域一致性、不变量)、Phase 3A 知识库(文档/版本化/生命周期/分块/元数据持久化/幂等与冲突拒绝/溯源/seed)、Phase 3B 检索(dense / sparse-BM25 / hybrid+RRF / 元数据与 ACTIVE 过滤 / 版本行为 / 溯源 / 空查询与无结果 / 27 条确定性数据集)与 Phase 3C 重排 + 上下文组装(rerank 排序信号 / 版本安全去重 / ACTIVE 优先 / token budget / 截断 / 溯源 / 多版本不合并 / 确定性 / 端到端 pipeline)、Phase 4A Agent Workflow(Intent 分类 / Intent≠Route / 实体提取与不猜单 / RAG 分支接真实 RetrievalPipeline / ToolRequest 只规划不执行 / Clarify / Escalate / Response State 序列化 / agent 层无 DB import 边界)与 Phase 4B Tool Execution(Tool Registry allowlist / Pydantic 输入校验 / user_id trusted context 与跨用户越权拒绝 / 六工具正反场景 / Executor 错误归一化 / Agent↔Tool 全链路 / REFUND 条件退款与端到端 DB 持久化)。数据库与检索/工具测试运行于内存 SQLite(全套 273 例全绿,Phase 4B 新增 60 例);PostgreSQL / pgvector 集成测试待具备 Docker 的环境执行。
+后端测试覆盖:health(HTTP 200)、Phase 2A 数据层(FK 约束、状态列 CHECK、seed 确定性与业务断言)、Phase 2B Mock Business API(订单/物流/退款/取消/工单与 Repository 边界)、Phase 2C 业务场景(工作流、跨域一致性、不变量)、Phase 3A 知识库(文档/版本化/生命周期/分块/元数据持久化/幂等与冲突拒绝/溯源/seed)、Phase 3B 检索(dense / sparse-BM25 / hybrid+RRF / 元数据与 ACTIVE 过滤 / 版本行为 / 溯源 / 空查询与无结果 / 27 条确定性数据集)与 Phase 3C 重排 + 上下文组装(rerank 排序信号 / 版本安全去重 / ACTIVE 优先 / token budget / 截断 / 溯源 / 多版本不合并 / 确定性 / 端到端 pipeline)、Phase 4A Agent Workflow(Intent 分类 / Intent≠Route / 实体提取与不猜单 / RAG 分支接真实 RetrievalPipeline / ToolRequest 只规划不执行 / Clarify / Escalate / Response State 序列化 / agent 层无 DB import 边界)与 Phase 4B Tool Execution(Tool Registry allowlist / Pydantic 输入校验 / user_id trusted context 与跨用户越权拒绝 / 六工具正反场景 / Executor 错误归一化 / Agent↔Tool 全链路 / REFUND 条件退款与端到端 DB 持久化)与 Phase 5 Risk Control + HITL(Risk Engine 分级 / 取消→用户确认 / 退款→人工审批 / Approval API / Resume 绑定原 ToolRequest / Execute→Verify / 金额不可控与业务安全)。数据库与检索/工具测试运行于内存 SQLite(全套 313 例全绿,Phase 5 新增 40 例);PostgreSQL / pgvector 集成测试待具备 Docker 的环境执行。
 
 ## 说明与限制
 
-- 当前**已实现** Phase 4A Agent Workflow 骨架(AgentState / Intent 分类 / Routing / RAG 分支 / ToolRequest 接口)与 Phase 4B Tool Execution(Tool Registry / Tool Executor / 六个售后工具 / 参数校验 / trusted user_id 授权 / ToolResult)。**未实现** LLM 对话编排(未来 Responses API)、MCP、风控、Human-in-the-loop 与 RAG 的生成/Grounding(见 Phase 状态)。Phase 3A 知识入库 + Phase 3B 本地混合检索(Dense + BM25 + RRF)、Phase 3C 重排 + 上下文组装已完成并通过测试。Agent 层不调用真实 LLM;业务工具只经注入的 ToolExecutor 执行,Agent 层仍不直接访问 DB;`DeterministicIntentClassifier` 为确定性规则测试实现(非生产 NLP);本阶段未引入 LangGraph(仅作后续编排运行时,经 adapter 接入)。真实 Embedding 模型与 pgvector 未接入/未实测。风控与人工审批属 Phase 5。退款创建仅生成 PENDING 申请,不执行资金操作。
+- 当前**已实现** Phase 4A Agent Workflow 骨架(AgentState / Intent 分类 / Routing / RAG 分支 / ToolRequest 接口)与 Phase 4B Tool Execution(Tool Registry / Tool Executor / 六个售后工具 / 参数校验 / trusted user_id 授权 / ToolResult),并已完成 Phase 5 Risk Control + HITL(Risk Engine / Risk Gate / 用户确认 / 人工审批 / Resume / Verify,见 docs/RISK_CONTROL.md)。**未实现** LLM 对话编排(未来 Responses API)、MCP 与 RAG 的生成/Grounding(见 Phase 状态)。Phase 3A 知识入库 + Phase 3B 本地混合检索(Dense + BM25 + RRF)、Phase 3C 重排 + 上下文组装已完成并通过测试。Agent 层不调用真实 LLM;业务工具只经注入的 ToolExecutor 执行,Agent 层仍不直接访问 DB;`DeterministicIntentClassifier` 为确定性规则测试实现(非生产 NLP);本阶段未引入 LangGraph(仅作后续编排运行时,经 adapter 接入)。真实 Embedding 模型与 pgvector 未接入/未实测。退款创建仅生成 PENDING 申请,不执行资金操作;Agent 侧执行退款须人工审批,执行后再 Verify(Phase 5)。
 - PostgreSQL 选用带 pgvector 的官方镜像,为后续 RAG 阶段做准备;9 张表(7 业务表 + 2 知识库表)经 Alembic 迁移创建,数据层、API 与迁移均以 SQLite 验证,真实 PostgreSQL / pgvector 未实机验证。
 
 - Docker 尚未实机验证(本机未安装 Docker),`docker-compose.yml` 为「已编写、未验证」状态,README 不作已验证声明。

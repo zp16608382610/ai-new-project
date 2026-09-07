@@ -100,6 +100,7 @@ class AgentRunStatus(str, enum.Enum):
     FAILED = "FAILED"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
 
+
 class AgentResultStatus(str, enum.Enum):
     """High-level outcome of one workflow run (Response State)."""
 
@@ -141,7 +142,6 @@ class ToolRequest:
             "reason": self.reason,
             "requires_confirmation": self.requires_confirmation,
             "status": self.status.value,
-            "run_status": self.run_status.value,
         }
 
     @classmethod

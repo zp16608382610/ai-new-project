@@ -14,8 +14,8 @@
 - **Phase 3D — RAG · Knowledge Management & Integration:not started**
 - **Phase 4A — Agent · Workflow(State / Intent / Routing / RAG branch / ToolRequest interface):completed**
 - **Phase 4B — Agent · Tool Execution:completed**(工具执行框架与售后域工具接入完成,原「Phase 5 — Tools」范围并入)
-- **Phase 5 — Risk Control + Human-in-the-loop:not started**(下一阶段)
-- **Phase 6 — MCP:not started**
+- **Phase 5 — Risk Control + Human-in-the-loop:completed**
+- **Phase 6 — MCP:not started**(下一阶段)
 - **Phase 7 — Evaluation + Observability:not started**
 - **Phase 8 — Final Demo:not started**
 
@@ -145,13 +145,19 @@
 - 新增测试:`tests/test_tools.py`(Registry / Validation / Authorization / 六工具正反场景)、`tests/test_tool_executor.py`(执行 / UNKNOWN_TOOL / 校验与业务错误归一化 / 异常归一化 / user_id 不可覆盖)、`tests/test_agent_tool_integration.py`(ORDER_STATUS / LOGISTICS / REFUND 条件退款 / CANCEL / TICKET 经 Agent 全链路 + CLARIFY / ESCALATE / RAG 不执行 + 端到端 User request → … → DB → AgentResult);全套 **213 + 60 = 273 例全绿**,`compileall -q backend` 通过。
 - 零新增依赖;不 commit / 不进入 Phase 5(Risk Control + Human-in-the-loop)。
 
-## Phase 5 — Risk Control + Human-in-the-loop [NOT STARTED]
+## Phase 5 — Risk Control + Human-in-the-loop [COMPLETED]
 
-> 下一阶段:Phase 4B 完成后进入。原「Phase 5 — Tools」的 Tool Calling 定义 / 注册 / 执行框架与售后域工具接入已在 Phase 4B 内完成,后续阶段按此重排:Phase 5 = Risk Control + HITL、Phase 6 = MCP、Phase 7 = Evaluation + Observability、Phase 8 = Final Demo。
+已完成(Phase 5 MVP;不引入 LangGraph / MCP / Redis / Kafka / RBAC / 生产级审计):
 
-- 风控规则引擎与风险分级(LOW / MEDIUM / HIGH / CRITICAL)在 Tool Execution 之上生效(工具已携带 risk_level metadata)
-- 高风险操作先过风控再执行;CRITICAL 默认转人工
-- Interrupt → Approval → Resume 人工介入;审批队列与审计(Console 页接通)
+- **Risk Engine / Policy**(backend/app/risk/):LOW / MEDIUM / HIGH / CRITICAL + RiskAction(AUTO_EXECUTE / USER_CONFIRM / HUMAN_APPROVAL / BLOCK);规则集中在 policy 常量(含高金额退款阈值 500,见 backend/app/risk/policy.py),不写在 Tool Handler;未注册操作 fail-closed BLOCK;引擎纯逻辑、不触数据库。
+- **Workflow Risk Gate**(backend/app/agent/workflow.py):ToolRequest → RiskEngine → Gate → ToolExecutor → Verify。LOW 自动执行;MEDIUM(取消订单)等待用户确认——confirmed=True 才执行、confirmed=False 返回 REJECTED 不执行;HIGH / CRITICAL(退款执行默认人工审批)持久化 PENDING approval_requests 并进入 WAITING_HUMAN_APPROVAL,不执行。
+- **Approval 绑定原始 ToolRequest**:approval_requests 表(Alembic 迁移 7a9c1e4b8d2f)保存 tool_name + tool_arguments 快照;审批 API GET /api/v1/approvals、POST /{id}/approve、POST /{id}/reject;PENDING→APPROVED / REJECTED,重复处理返回 409;approve 后 resume 该快照执行——不重新让 LLM 生成参数;业务规则仍生效(重复退款在 resume 时仍被 Service 拒绝)。
+- **Execute → Verify**(backend/app/services/verification.py):create_refund 后重查 DB(refund 存在 / status PENDING / amount == 订单权威 total_amount),cancel_order 后重查 order.status == CANCELLED;不符 → run_status / AgentResult = VERIFICATION_FAILED,不向用户报假成功。
+- **退款金额不可控**:退款金额只由 Service 从 order.total_amount 推导,输入 schema 不收 amount,用户 / Agent 都不能控制退款金额。
+- **测试**:新增 40 例(risk / risk_gate / approval_api / approval_flow 四文件),全套 313 例全绿;backend compileall 通过;零新增依赖。
+- **文档**:新增 docs/RISK_CONTROL.md;ARCHITECTURE.md §6/§7/§19、DECISIONS.md(032-036)、README.md 已同步。
+
+说明:Phase 5 风控 / HITL 接入点位于 Agent 工具执行路径(workflow 注入 RiskEngine / ApprovalGateway / Verifier);Phase 2B 的直连 Mock HTTP API 保持原样。Direct refund 仍只创建 PENDING 退款申请,不执行资金操作。
 
 ## Phase 6 — MCP [NOT STARTED]
 

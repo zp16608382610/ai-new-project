@@ -345,3 +345,63 @@ never reached. Full Risk Control / Human-in-the-loop lands in Phase 5.
 Fidelity to the refund requirement (never create a refund on an ineligible order)
 matters more than mechanical one-call symmetry; the sequence stays readable and the
 second step is not a general agent loop.
+
+## Decision 032 — Risk Engine is pure and policy-driven
+
+**Decision:**
+Phase 5 introduces `app/risk` (RiskEngine / RiskPolicy / RiskLevel / RiskAction /
+RiskDecision / RiskContext). The mapping from operation (+ business context) to a
+decision lives in policy data (including `high_value_refund_threshold = 500`),
+never inside Tool Handlers. Operations without a registered rule are BLOCKed
+(fail-closed) instead of auto-executed.
+
+**Reason:**
+Rules become auditable and changeable without touching tool or agent code, and an
+unregistered operation can never silently execute.
+
+## Decision 033 — Refund execution defaults to Human Approval
+
+**Decision:**
+`create_refund` is HIGH (HUMAN_APPROVAL); refunds at or above the configured
+threshold are CRITICAL (still HUMAN_APPROVAL). Eligibility checks stay LOW /
+AUTO_EXECUTE.
+
+**Reason:**
+A refund is real financial loss; the MVP never lets the agent execute a
+money-affecting operation unconditionally, even after an eligibility check passes.
+
+## Decision 034 — Approval binds the original ToolRequest and resumes its snapshot
+
+**Decision:**
+`approval_requests` persists tool_name + tool_arguments as an immutable snapshot
+plus request_id / risk_level / reason / status / timestamps / resolved_by.
+Approving resumes exactly that stored snapshot through the Tool Executor; the LLM
+is never asked to re-plan or re-generate arguments after approval.
+
+**Reason:**
+Prevents the reviewed action (order X) silently becoming a different action
+(order Y) at execution time, and keeps resume deterministic and auditable.
+
+## Decision 035 — Execute → Verify re-checks authoritative business state
+
+**Decision:**
+After a successful `create_refund` / `cancel_order`, the workflow re-queries the
+Repository / DB and requires the expected authoritative state (refund row exists
+with status PENDING and amount == order.total_amount; order.status == CANCELLED).
+Any mismatch ends the run with VERIFICATION_FAILED.
+
+**Reason:**
+Tool output can be stale or wrong; the database is the source of truth, so a fake
+"tool success" can never be reported to the user as a completed refund/cancel.
+
+## Decision 036 — Refund amount is never user- or agent-controlled
+
+**Decision:**
+Tool input schemas do not accept an amount field; the Service derives the refund
+amount from the order's authoritative total_amount. The workflow passes only the
+eligibility result amount into the RiskContext for classification and never into
+execution.
+
+**Reason:**
+Neither the end user nor the model can influence financial amounts; there is one
+authoritative computation of the refund amount.

@@ -76,14 +76,14 @@ Query
 
 ## 6. Risk
 
-风险等级(详见 docs/PRD.md):
+风险等级与处置(Phase 5 落地实现;业务视角另见 docs/PRD.md):
 
-- LOW — Agent 直接处理(如查询类)
-- MEDIUM — 可直接处理但需留痕/判定(如资格判定)
-- HIGH — 需二次确认或风控评估后执行(如取消订单)
-- CRITICAL — 默认转人工审批(如执行退款)
+- LOW → AUTO_EXECUTE:FAQ / 知识问答、订单查询、物流查询、退款资格查询等只读操作直接执行。
+- MEDIUM → USER_CONFIRM:取消订单。必须等待用户确认(confirmed=True 才执行;confirmed=False → REJECTED 不执行)。
+- HIGH / CRITICAL → HUMAN_APPROVAL:退款执行默认人工审批;金额 ≥ 阈值 500(policy 常量,可配置)判为 CRITICAL,其余为 HIGH。
+- 未知操作 → BLOCK(fail-closed),不会静默自动执行。
 
-高/极高风险操作**不能**未经风险控制直接执行。
+规则是 policy 数据(backend/app/risk/policy.py),不写在 Tool Handler;退款金额等业务上下文由 Workflow/Service 查询后提供给 Risk Engine,引擎不读 DB、不信任用户输入金额。高/极高风险操作**不能**未经风险控制直接执行。
 
 ## 7. Human-in-the-loop
 
@@ -94,6 +94,8 @@ Interrupt → Approval → Resume
 - 触发点:CRITICAL 操作、风控命中、异常/低置信会话、用户要求转人工。
 - 审批:客服运营 approve / reject(留痕)。
 - 恢复:审批通过后从断点恢复,继续原工作流。
+
+落地(Phase 5):审批请求持久化到 `approval_requests`(绑定原始 ToolRequest 快照),经 `GET /api/v1/approvals`、`POST /api/v1/approvals/{id}/approve`、`POST /api/v1/approvals/{id}/reject` 处理;approve 后 workflow 恢复执行该审批绑定的快照(不重新让 LLM 生成参数),执行后再 Verify(见 §19 与 docs/RISK_CONTROL.md)。
 
 ## 8. Evaluation
 
@@ -188,7 +190,7 @@ Mock API 与 Agent Tool 的映射(Phase 4B 已落地执行):
 | POST /orders/{order_id}/cancel | cancel_order | S6 Cancel Order(Phase 5 加风控/HITL) |
 | POST /tickets | create_ticket | S7 Complaint |
 
-说明:Phase 2B 的 `create_refund` 只创建 PENDING 退款申请、`cancel` 直接执行取消——两者目前都未接入风控与人工审批(Risk Control / HITL 属 Phase 5,届时高危操作先过 Risk Control 再调用本层服务)。
+说明:Phase 2B 阶段 `create_refund` 只创建 PENDING 退款申请、`cancel` 直接执行取消,直连 Mock HTTP API 未接入风控;Phase 5 已在 Agent 工具执行路径接入 Risk Control / HITL(高危操作先过 Risk Control 再调用 Service,见 §19),资金操作仍仅创建 PENDING 退款申请。
 
 ## 13. Business Scenario Validation(Phase 2C 落地)
 
@@ -319,3 +321,38 @@ AgentState.tool_results → FINALIZE → Response State
 - **Cancellation**:`cancel_order` 继续使用现有 Service 状态机(DELIVERED / REFUNDED 不可取消、在途退款阻止取消);`requires_confirmation=True` 与 risk_level 仅作为 metadata 记录,完整 Risk Control / HITL 属 Phase 5。
 - **一次 Tool Call first**:普通请求 = 一个 ToolRequest → 一个 ToolResult(循环为数据驱动结构,未来可扩展为 Tool Call → Result → reasoning → next Tool Call;决策 Decision 031)。
 - **验证**:Phase 4B 新增 60 例测试(Registry / Validation / Authorization / 六工具 / Executor / Agent↔Tool 集成 / 端到端 DB),全套 273 例全绿;零新增依赖(Decision 025–031)。
+
+
+## 19. Risk Control + Human-in-the-loop Architecture(Phase 5 落地)
+
+Phase 5 MVP 把 Phase 4B 的执行链升级为:
+
+```text
+Agent(Intent / Route → ToolRequest)
+ ↓
+Risk Engine(ToolRequest + RiskContext → RiskDecision;纯分类,不触 DB)
+ ↓
+Risk Gate(按 RiskAction 分流)
+ ↓
+User Confirmation / Human Approval
+ ↓
+Tool Executor
+ ↓
+Business Service(业务规则唯一归属)
+ ↓
+Repository
+ ↓
+Database
+ ↓
+Verify(重查权威业务状态 → Final Response)
+```
+
+- **Risk 包**(backend/app/risk/):types(Level / Action / Decision / Context)、policy(规则 + `high_value_refund_threshold = 500`)、engine(纯分类)。等级 LOW / MEDIUM / HIGH / CRITICAL;动作 AUTO_EXECUTE / USER_CONFIRM / HUMAN_APPROVAL / BLOCK;未注册操作 fail-closed BLOCK。
+- **Workflow Risk Gate**(backend/app/agent/workflow.py):`_execute_risk_gated` / `_execute_auto_or_confirmed` / `_wait_user_confirmation` / `_wait_human_approval` / `resume_after_approval`。LOW 直接执行;MEDIUM(取消)先等用户确认;HIGH / CRITICAL(退款)先建 PENDING 审批再停等;任何执行都只在确认/审批通过后进行。
+- **审批模型**:`approval_requests` 表(Alembic `7a9c1e4b8d2f`,绑定 tool_name + tool_arguments 快照 + request_id / risk_level / reason / status / created_at / resolved_at / resolved_by);ApprovalService 状态机 PENDING → APPROVED / REJECTED;已处理再审批 → 409。
+- **Approval API**(backend/app/api/routes/approvals.py):`GET /api/v1/approvals`(待审批)、`POST /api/v1/approvals/{id}/approve`、`POST /api/v1/approvals/{id}/reject`(404 不存在 / 409 已处理)。
+- **Resume 语义**:approve 后从审批快照重建 ToolRequest 并执行(绝不重新让 LLM 生成参数);reject 返回 REJECTED 不执行;重复 resume / resume-after-reject 返回结构化错误。
+- **Execute → Verify**(backend/app/services/verification.py):create_refund 后重查 DB(refund 存在 / status PENDING / amount == 订单权威 total_amount);cancel_order 后重查 order.status == CANCELLED;不符 → run_status = VERIFICATION_FAILED,不向用户报假成功。
+- **金额边界**:退款金额只由 Service 从订单权威金额推导;工具输入 schema 不收 amount;RiskContext 只承载 Service 查询出的金额用于分级(Decision 036)。
+- **Run 状态**:AgentRunStatus 增 WAITING_USER_CONFIRMATION / WAITING_HUMAN_APPROVAL / REJECTED / VERIFICATION_FAILED,与 AgentResultStatus 一一对应(可观测、可测试)。
+- **验证**:新增 40 例测试(risk / risk_gate / approval_api / approval_flow),全套 313 例全绿;compileall 通过;零新增依赖。详情见 docs/RISK_CONTROL.md。

@@ -138,7 +138,7 @@ class ApprovalGatewayLike(Protocol):
     """
 
     def create(self, *, request_id, tool_name, tool_arguments, risk_level, reason, user_id):
-        """Persist a PENDING approval and return its id."""
+        """Persist a PENDING approval and return its id (or an object with .id)."""
         ...
 
     def get(self, approval_id):
@@ -266,7 +266,7 @@ class AgentWorkflow:
             status=WorkflowStage.START,
         )
         try:
-            result = self._execute_inner(state, user_confirmed)
+            result = self._execute_inner(state, user_confirmed=user_confirmed)
         except Exception as exc:  # defensive error boundary; never fabricate success
             state.error = f"{type(exc).__name__}: {exc}"
             state.status = WorkflowStage.END
@@ -431,6 +431,12 @@ class AgentWorkflow:
             user_id=state.user_id,
         )
         assert self._tool_executor is not None
+        return self._tool_executor.execute(
+            request.tool_name,
+            request.arguments,
+            context,
+            requires_confirmation=request.requires_confirmation,
+        )
 
     # -- Phase 5: Risk Gate -----------------------------------------------
 
@@ -603,7 +609,7 @@ class AgentWorkflow:
                     "Human approval is required but no approval gateway is configured."
                 ),
             )
-        approval_id = self._approval_gateway.create(
+        created = self._approval_gateway.create(
             request_id=state.request_id,
             tool_name=request.tool_name,
             tool_arguments=dict(request.arguments),
@@ -611,6 +617,8 @@ class AgentWorkflow:
             reason=decision.reason,
             user_id=state.user_id,
         )
+        # ApprovalService returns an ApprovalView; a stub may return an int.
+        approval_id = created.id if not isinstance(created, int) else created
         pending = replace(request)
         state.tool_requests = tuple(processed) + (pending,)
         state.tool_results = tuple(item.to_dict() for item in results)
@@ -637,7 +645,10 @@ class AgentWorkflow:
         """
         if self._approval_gateway is None:
             return self._resume_error(approval_id, "No approval gateway is configured.")
-        view = self._approval_gateway.get(approval_id)
+        try:
+            view = self._approval_gateway.get(approval_id)
+        except Exception as exc:  # real gateway raises NotFoundError on missing ids
+            return self._resume_error(approval_id, str(exc))
         if view is None:
             return self._resume_error(approval_id, "Approval request not found.")
         try:
