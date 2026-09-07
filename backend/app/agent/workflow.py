@@ -182,6 +182,8 @@ class AgentWorkflow:
         risk_engine: RiskEngineLike | None = None,
         approval_gateway: ApprovalGatewayLike | None = None,
         verifier: ToolVerifierLike | None = None,
+        llm_intent: 'LLMIntentExtractor | None' = None,
+        llm_responder: 'FinalResponder | None' = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
@@ -191,6 +193,8 @@ class AgentWorkflow:
         self._risk_engine = risk_engine
         self._approval_gateway = approval_gateway
         self._verifier = verifier
+        self._llm_intent = llm_intent
+        self._llm_responder = llm_responder
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -232,6 +236,7 @@ class AgentWorkflow:
         user_id: int | None = None,
         session_id: str | None = None,
         user_confirmed: bool | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> AgentResult:
         """Run the workflow and return the Response State (AgentResult)."""
         _, result = self.execute(
@@ -240,6 +245,7 @@ class AgentWorkflow:
             user_id=user_id,
             session_id=session_id,
             user_confirmed=user_confirmed,
+            history=history,
         )
         return result
 
@@ -251,6 +257,7 @@ class AgentWorkflow:
         user_id: int | None = None,
         session_id: str | None = None,
         user_confirmed: bool | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[AgentState, AgentResult]:
         """Run the workflow and return (AgentState, AgentResult).
 
@@ -266,7 +273,10 @@ class AgentWorkflow:
             status=WorkflowStage.START,
         )
         try:
-            result = self._execute_inner(state, user_confirmed=user_confirmed)
+            result = self._execute_inner(
+                state, user_confirmed=user_confirmed, history=history
+            )
+            result = self._with_llm_response(state, result, history=history)
         except Exception as exc:  # defensive error boundary; never fabricate success
             state.error = f"{type(exc).__name__}: {exc}"
             state.status = WorkflowStage.END
@@ -288,20 +298,33 @@ class AgentWorkflow:
 
     # -- internals ----------------------------------------------------------
 
-    def _execute_inner(self, state: AgentState, *, user_confirmed: bool | None = None) -> AgentResult:
+    def _execute_inner(
+        self,
+        state: AgentState,
+        *,
+        user_confirmed: bool | None = None,
+        history: list[dict[str, str]] | None = None,
+    ) -> AgentResult:
         state.status = WorkflowStage.UNDERSTAND
-        entities = self._entity_extractor.extract(state.user_message)
-        state.entities = entities
+        proposal: LLMIntentProposal | None = None
+        if self._llm_intent is not None:
+            proposal = self._llm_intent.understand(state.user_message)
+        deterministic_entities = self._entity_extractor.extract(state.user_message)
+        state.entities = self._merge_entities(proposal, deterministic_entities)
 
         state.status = WorkflowStage.CLASSIFY_INTENT
-        intent_result = self._classifier.classify(state.user_message)
-        state.intent = intent_result.intent
-        state.intent_confidence = intent_result.confidence
+        if proposal is not None:
+            state.intent = proposal.intent_enum
+            state.intent_confidence = proposal.confidence
+        else:
+            intent_result = self._classifier.classify(state.user_message)
+            state.intent = intent_result.intent
+            state.intent_confidence = intent_result.confidence
 
         state.status = WorkflowStage.ROUTE
         decision = self._router.decide(
-            intent_result.intent,
-            entities,
+            state.intent,
+            state.entities,
             user_id=state.user_id,
             user_message=state.user_message,
         )
@@ -328,6 +351,78 @@ class AgentWorkflow:
                 escalation_required=True,
             )
         raise RuntimeError(f"Unhandled route: {decision.route}")
+    @staticmethod
+    def _merge_entities(
+        proposal: LLMIntentProposal | None,
+        deterministic: ExtractedEntities,
+    ) -> ExtractedEntities:
+        """LLM entities fill gaps; the deterministic no-guess rule wins."""
+        # Lazy import: app.llm.nlu -> app.agent would create an import cycle at
+        # module load time (app.agent/__init__ -> app.agent.workflow).
+        from app.llm.nlu import proposal_entities
+        if proposal is None:
+            return deterministic
+        llm_entities = proposal_entities(proposal)
+        order_id = deterministic.order_id
+        if (
+            not deterministic.has_multiple_order_ids
+            and llm_entities is not None
+            and llm_entities.order_id
+        ):
+            order_id = llm_entities.order_id
+        tracking_number = deterministic.tracking_number
+        if (
+            tracking_number is None
+            and llm_entities is not None
+            and llm_entities.tracking_number
+        ):
+            tracking_number = llm_entities.tracking_number
+        return ExtractedEntities(
+            order_id=order_id,
+            tracking_number=tracking_number,
+            has_multiple_order_ids=deterministic.has_multiple_order_ids,
+            has_multiple_tracking_numbers=deterministic.has_multiple_tracking_numbers,
+        )
+
+    def _with_llm_response(
+        self,
+        state: AgentState,
+        result: AgentResult,
+        *,
+        user_message: str | None = None,
+        history: list[dict[str, str]] | None = None,
+    ) -> AgentResult:
+        """Attach the LLM final response to a successful answerable run.
+
+        Evidence comes only from what the workflow already collected (retrieved
+        knowledge and/or authoritative ToolResults). Any responder failure
+        returns None and keeps the deterministic response text.
+        """
+        if result.status is not AgentResultStatus.SUCCESS or self._llm_responder is None:
+            return result
+        knowledge: list[dict[str, object]] = []
+        if state.retrieved_context is not None:
+            knowledge = [
+                {
+                    "title": item.title,
+                    "version": item.version,
+                    "section": item.section,
+                    "citation": item.citation,
+                    "content": item.content,
+                }
+                for item in state.retrieved_context.items
+            ]
+        evidence: dict[str, object] = {
+            "knowledge": knowledge,
+            "tools": [dict(item) for item in state.tool_results],
+        }
+        if not knowledge and not state.tool_results:
+            return result
+        message = state.user_message if user_message is None else user_message
+        text = self._llm_responder.respond(message, evidence, history=history)
+        if not text:
+            return result
+        return replace(result, response=text)
 
     def _run_rag(self, state: AgentState) -> AgentResult:
         state.status = WorkflowStage.RAG
@@ -637,6 +732,8 @@ class AgentWorkflow:
         *,
         approved: bool,
         resolved_by: str | None = None,
+        user_message: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[AgentState, AgentResult]:
         """Resume the ORIGINAL ToolRequest bound to an approval.
 
@@ -685,11 +782,16 @@ class AgentWorkflow:
         if stop is not None:
             return state, stop
         state.run_status = AgentRunStatus.COMPLETED
-        return state, AgentResult(
+        result = AgentResult(
             status=AgentResultStatus.SUCCESS,
             route=state.route,
             tool_requests=tuple(processed),
         )
+        result = self._with_llm_response(
+            state, result, user_message=user_message, history=history
+        )
+        state.response = result.response
+        return state, result
 
     def _resume_error(self, approval_id: int, message: str) -> tuple[AgentState, AgentResult]:
         state = AgentState(request_id=f"resume-{approval_id}", user_message="")

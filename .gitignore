@@ -8,6 +8,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# 本地 Demo / SQLite(由 bootstrap 或临时运行生成,不入库)
+backend/demo.db
+backend/local.db
+
 # ---- 环境变量 ----
 .env
 .env.*
@@ -18,6 +22,9 @@ node_modules/
 .next/
 out/
 *.tsbuildinfo
+# next dev 自动生成的 agent 规则文件(每次运行会重新写入)
+frontend/AGENTS.md
+frontend/CLAUDE.md
 
 # ---- IDE / OS / 日志 ----
 .idea/

@@ -43,6 +43,8 @@
 | 037 | Internal Tools and MCP Tools coexist | Accepted | 2026-09-07 |
 | 038 | MCP never bypasses Risk Control (no refund/cancel over MCP) | Accepted | 2026-09-07 |
 | 039 | MCP errors are normalized into internal ToolResult | Accepted | 2026-09-07 |
+| 040 | LLM Provider isolated behind an abstraction | Accepted | 2026-09-07 |
+| 041 | LLM output is an untrusted proposal | Accepted | 2026-09-07 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -453,3 +455,32 @@ SDK exceptions never reach the Agent layer.
 **Reason:**
 Keeps Agent and observability / evaluation consumers on one error contract
 regardless of transport (internal executor or MCP).
+
+## Decision 040 — LLM Provider isolated behind an abstraction
+
+**Decision:**
+The Agent never calls a vendor SDK directly. Real DeepSeek is exposed through a
+minimal `LLMProvider` Protocol (`backend/app/llm/base.py`) with one
+OpenAI-compatible `DeepSeekProvider` implementation (httpx). The workflow only
+depends on the abstraction, so the model vendor can be swapped without touching
+Agent / Risk / Approval / Tool / MCP logic.
+
+**Reason:**
+Avoids coupling Agent business logic to a specific model vendor; tests and CI
+inject lightweight fakes behind the same interface (zero network), and future
+model integration (OpenAI Responses API) can add a provider without rewriting
+the workflow.
+
+## Decision 041 — LLM output is an untrusted proposal; deterministic business controls remain authoritative
+
+**Decision:**
+LLM output (intent / entities / final wording) is treated as an untrusted
+proposal. It never executes tools, never decides eligibility or amounts, never
+changes risk levels and never authorizes approvals. Execution stays behind
+Risk Gate → User Confirmation / Human Approval → Tool Executor / MCP Adapter →
+Verify; the Business Service remains the authoritative source of facts.
+
+**Reason:**
+Prompt injection or a malformed model response cannot bypass deterministic
+security boundaries by construction; for high-risk actions "LLM failure =>
+do not auto-execute" holds (fallback to deterministic classifier / CLARIFY).

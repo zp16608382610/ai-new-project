@@ -100,7 +100,7 @@ Interrupt → Approval → Resume
 
 ## 8. Evaluation
 
-五层评测(Phase 7):
+五层评测(Phase 7C):
 
 - Retrieval / Generation / Agent / Tool / Product
 
@@ -400,3 +400,42 @@ Repository → DB
 - **错误归一化**:MCP Client 把 tool not found / invalid arguments / server error / malformed result 映射为内部 `ToolResult`(status + `MCP_*` 错误码),SDK exception 不进入 Agent 层(Decision 039)。
 - **实现**:`backend/app/mcp/`(tools.py / server.py / client.py / adapter.py);stdio 本地传输;一次调用一条短生命周期连接;仅新增官方依赖 `mcp==2.1.1`(Python 3.13.14 兼容)。
 - **验证**:新增 24 例 MCP 测试(server 6 / client 10 / adapter 8),全套 337 例全绿;`compileall` 通过。详见 docs/MCP.md。
+
+## 21. Frontend Demo Layer(Phase 7A 落地)
+
+Phase 7A 的目的不是扩展后端能力,而是把「已完成的 Agent 能力」变成面试现场可演示的产品 Demo。三个前端页面(`/chat` / `/console` / `/evaluation`)只是**展示层**,不承担任何 Agent 决策逻辑。
+
+```text
+Chat UI · Console UI · Evaluation UI(Next.js + TypeScript,展示层)
+        │  fetch("/api/v1/...")
+        ▼
+Next dev server rewrites(frontend/next.config.mjs,/api/v1 → http://127.0.0.1:8000)
+        ▼
+FastAPI /api/v1/demo/*(backend/app/demo/,薄层:只做编排与 JSON 投影)
+        ▼
+AgentWorkflow → RetrievalPipeline / MCPToolAdapter / RiskEngine
+        ▼
+ApprovalService → ToolExecutor(内部)/ MCP(stdio)→ Business Service
+        ▼
+Repository → Database(demo.db,SQLite)
+```
+
+- **前端不硬编码业务结果**:订单状态、物流、退款金额、知识来源全部来自后端真实 API;订单 ID 取自 demo seed(ORD-1001 / ORD-1002 / ORD-1003),不在 UI 猜测。
+- **前端不做风险 / 审批决策**:RiskEngine 分级、是否需要用户确认 / 人工审批、退款金额、执行与校验全部由后端决定;前端只把真实返回值呈现给用户与运营。
+- **`/chat`** 展示会话 + 右侧 Agent Trace(Intent / Route / RAG 来源 / Tool Provider / Risk / Approval / Verification / Final Response),让决策过程可理解(例如「为什么没有直接退款」→ 高风险 → 人工审批)。
+- **`/console`** 展示 Approval Queue、Risk Decision、Agent Action、订单权威状态与金额,提供 Approve / Reject;审批通过后展示 Resume → Execute → Verify 结果。
+- **`/evaluation`** 只保留基础结构(Reliability 分类 + AI Quality 标记 Planned / Lightweight MVP),**不伪造** accuracy / precision / recall 指标。
+- **约束**:Demo 层不重写 AgentWorkflow / RiskEngine / ToolExecutor / MCP / HITL;会话与审批投影为进程内存储,演示用单 worker 后端;不把业务规则写进 UI。
+## 22. LLM Provider Layer(Phase 7B 落地)
+
+```text
+User → LLM(理解)→ Agent Workflow → RAG / Tool / MCP
+     → Risk Gate → User Confirmation / Human Approval
+     → Execute → Verify → LLM Final Response(仅基于权威证据)
+```
+
+- **LLM ≠ Business Logic**:真实 DeepSeek 只做两件事——① 意图 + 参数理解(结构化输出,Pydantic 校验,失败回退);② 把 workflow 已收集的权威证据(RAG 知识 / ToolResult)转成自然语言最终回复。它不查询数据库、不调用 Repository、不修改订单 / 退款、不创建审批、不调用 MCP、不执行工具。
+- **抽象层**(`backend/app/llm/`):`base.py`(`LLMProvider` Protocol,OpenAI-compatible 消息)、`deepseek.py`(`DeepSeekProvider`,httpx 轻量客户端,仅调用 `/chat/completions`)、`prompts.py`(集中 System Prompt,无任何 secret)、`nlu.py`(严格 JSON → Pydantic,失败即回退)、`respond.py`(最终回复生成,无证据不调用)、`errors.py`(统一错误:LLM_TIMEOUT / LLM_AUTH_ERROR / LLM_RATE_LIMITED / LLM_PROVIDER_ERROR / LLM_INVALID_OUTPUT / LLM_CONFIG_ERROR)。
+- **Deterministic 保留**:`LLM_ENABLED=false`(默认)或未配置 Key 时,`/chat` 走既有确定性 IntentClassifier / 规则路由 / Risk / Approval / Execute / Verify;任何一次 LLM 失败都回退确定性路径——高风险动作「宁可不执行,也不自动执行」。
+- **边界不变**:LLM 输出是 untrusted proposal;Risk Gate、用户确认、人工审批、Tool Executor / MCP Adapter 与权威 Business Service 仍是唯一执行与授权来源(Decision 040 / 041)。
+- **安全**:API Key 只存在于请求头,不进入日志、Trace、API 响应、异常或前端;Key 由 `Settings`(环境变量 / `.env`)提供,`.env` 已被 .gitignore 忽略。
