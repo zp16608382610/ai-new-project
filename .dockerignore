@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Phase 8B build context ignores. Never bake real .env / demo.db / secrets
+# into an image.
+# ---------------------------------------------------------------------------
+
+# secrets & local data
+.env
+.env.*
+!.env.example
+!.env.production.example
+**/demo.db
+**/local.db
+
+# python
+.venv
+venv
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# node / next
+node_modules
+**/node_modules
+.next
+**/.next
+*.tsbuildinfo
+out
+
+# git / ide / os / logs
+.git
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+*.log

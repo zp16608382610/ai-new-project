@@ -16,6 +16,7 @@ backend/local.db
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # ---- Node / Next.js ----
 node_modules/

@@ -1,0 +1,27 @@
+# Enterprise AI Customer Service Agent - backend image (Phase 8B).
+# Interview Demo runtime: single uvicorn worker; demo.db lives on a named
+# volume mounted at /data (DATABASE_URL points there). No .env / demo.db /
+# secrets are baked into this image (.dockerignore).
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app/backend
+
+# Install pinned dependencies first (better layer caching).
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+
+# Application code. .dockerignore keeps .venv / demo.db / .env out.
+COPY backend /app/backend
+
+# Boot entrypoint: idempotent demo bootstrap, then uvicorn (single worker).
+COPY backend/docker-entrypoint.sh /app/backend/docker-entrypoint.sh
+RUN chmod +x /app/backend/docker-entrypoint.sh
+
+EXPOSE 8000
+
+ENTRYPOINT ["/app/backend/docker-entrypoint.sh"]

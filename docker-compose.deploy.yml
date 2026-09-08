@@ -1,0 +1,77 @@
+# Phase 8B deploy compose for the Interview Demo (single VPS).
+#
+# Local build + run (no Caddy needed for a quick check):
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#   http://localhost:3000/            (frontend)
+#   http://localhost:3000/api/v1/health  (via Next rewrite -> backend:8000)
+#
+# With HTTPS / Caddy (needs a domain pointing at the VPS):
+#   docker compose -f docker-compose.deploy.yml --profile caddy up -d --build
+#
+# DeepSeek is injected via environment (see .env.production.example). With
+# LLM_ENABLED=false (default) the demo runs fully deterministically offline.
+name: acsa-demo
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: acsa-demo-backend:local
+    restart: unless-stopped
+    environment:
+      # SQLite file lives on the named volume below (absolute container path).
+      DATABASE_URL: sqlite+pysqlite:////data/demo.db
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-30}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - demo_db:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: acsa-demo-frontend:local
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
+  # Optional HTTPS reverse proxy. Enable with --profile caddy once a domain is
+  # configured in deploy/Caddyfile. Kept as a profile so local verification of
+  # frontend+backend does not require port 80/443.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["caddy"]
+    depends_on:
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  demo_db:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,18 @@
+# Phase 8B Caddy template - no real domain is hard-coded.
+#
+# VPS / production:
+#   1) point your domain A/AAAA record at the VPS IP
+#   2) replace demo.example.com below with your real domain
+#   3) docker compose -f docker-compose.deploy.yml --profile caddy up -d --build
+# Caddy then obtains and renews TLS automatically (needs ports 80 + 443 open).
+#
+# Local test without a domain (plain HTTP on :80): comment the domain block and
+# uncomment the http:// block below.
+
+demo.example.com {
+    reverse_proxy frontend:3000
+}
+
+# http:// {
+#     reverse_proxy frontend:3000
+# }
