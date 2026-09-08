@@ -9,6 +9,8 @@
 import type {
   ApprovalsResponse,
   DemoRun,
+  EvaluationCasesResponse,
+  EvaluationReport,
   ResolveResponse,
 } from "./types";
 
@@ -109,5 +111,27 @@ export function rejectApproval(
   return requestJson<ResolveResponse>(`/demo/approvals/${approvalId}/reject`, {
     method: "POST",
     body: JSON.stringify({ resolved_by: resolvedBy }),
+  });
+}
+
+/** List the fixed Phase 7C evaluation dataset. */
+export function fetchEvaluationCases(): Promise<EvaluationCasesResponse> {
+  return requestJson<EvaluationCasesResponse>("/demo/evaluation/cases", {
+    method: "GET",
+  });
+}
+
+export interface RunEvaluationPayload {
+  use_llm: boolean;
+  case_ids?: string[];
+}
+
+/** Run the Phase 7C evaluation dataset against the real agent. */
+export function runEvaluation(
+  payload: RunEvaluationPayload,
+): Promise<EvaluationReport> {
+  return requestJson<EvaluationReport>("/demo/evaluation/run", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }

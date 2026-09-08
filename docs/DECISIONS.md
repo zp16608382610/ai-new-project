@@ -484,3 +484,23 @@ Verify; the Business Service remains the authoritative source of facts.
 Prompt injection or a malformed model response cannot bypass deterministic
 security boundaries by construction; for high-risk actions "LLM failure =>
 do not auto-execute" holds (fallback to deterministic classifier / CLARIFY).
+
+
+## Decision 042 — Evaluation is a fixed offline dataset; Observability stays single-process
+
+**Decision:**
+Phase 7C evaluation uses a FIXED local dataset executed against the real agent
+path (`run_chat` / `finalize_approval`) inside an isolated temporary SQLite
+database; metrics are categorical pass / fail / N/A checks (Intent / Entity /
+Route / Risk / Approval / Execution / Verification) and only count cases with
+an explicit expectation. Observability is a single-process event projection:
+AgentState records every Risk Gate decision (`risk_decisions`) and the demo run
+payload timeline carries Understand / Route / tool / Risk Gate / Human Approval
+/ Execute / Verify / Finalize steps with status + summary + provider. No
+distributed tracing, OTel, Kafka, Celery or Prometheus is added for the demo.
+
+**Reason:**
+The interview demo must be reproducible, explainable and honest: an isolated DB
+keeps evaluation writes out of the live demo data, N/A prevents fabricated
+scores, and the recorded risk-gate events make the decision chain auditable.
+Production-scale evaluation/tracing remains out of scope and is not claimed.

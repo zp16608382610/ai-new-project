@@ -1,6 +1,6 @@
 # Architecture — Enterprise AI Customer Service Agent
 
-> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索、Phase 3C 重排 + 上下文组装、Phase 4A Agent Workflow 骨架、Phase 4B Tool Execution、Phase 5 Risk Control + Human-in-the-loop 与 Phase 6 MCP MVP 已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
+> 目标架构(尚未全部实现;Phase 1 骨架、Phase 2A 数据层、Phase 2B Mock Business API、Phase 2C 场景验证、Phase 3A 知识库接入、Phase 3B 混合检索、Phase 3C 重排 + 上下文组装、Phase 4A Agent Workflow 骨架、Phase 4B Tool Execution、Phase 5 Risk Control + Human-in-the-loop、Phase 6 MCP MVP、Phase 7A Frontend Demo、Phase 7B LLM Provider 与 Phase 7C Evaluation + Observability 已落地)。对应决策记录见 docs/DECISIONS.md,阶段拆分见 docs/DEVELOPMENT_PLAN.md。
 
 ## 1. System Architecture
 
@@ -100,21 +100,23 @@ Interrupt → Approval → Resume
 
 ## 8. Evaluation
 
-五层评测(Phase 7C):
+评测分层(目标):Retrieval / Generation / Agent / Tool / Product 五层。
 
-- Retrieval / Generation / Agent / Tool / Product
-
-评测集与回归流程是 first-class 组件,随功能一起演进(详见 PRD §9)。
+- Phase 7C 已落地 Agent / Tool 层**固定数据集评测 MVP**(`backend/app/evaluation/`):9 类场景 11 个 case,七项指标(Intent / Entity / Route / Risk / Approval / Execution / Verification),带显式预期才计分,不适用标 N/A;详见 §23.2。
+- Retrieval 层评测(Recall@K / NDCG)与 Product 指标(退款成功率 / 一次解决率 / 人工介入率)保留至后续阶段(Phase 8 / PRD §9)。
 
 ## 9. Observability
 
-端到端 trace:
+端到端 trace 目标:
 
 ```text
 request → model → state → retrieval → tool → result → answer
 ```
 
-记录模型调用、状态流转、检索引用、工具结果、风控/审批事件(详见 PRD §10)。
+记录模型调用、状态流转、检索引用、工具结果、风控/审批事件。
+
+- Phase 7C 已落地**单机事件投影 MVP**:每个 run payload 的 `steps`(Understand / Route / tool / Risk Gate / Human Approval / Execute / Verify / Finalize)携带 status / summary / provider / result_data,AgentState 记录每次 Risk Gate 判定(`risk_decisions`);详见 §23.3。
+- 生产级 distributed tracing / 指标平台保留 Phase 8;不引入 OTel / Kafka / Prometheus(面试 Demo 边界)。
 
 ## 10. 分层依赖约定(对应 DECISIONS.md)
 
@@ -424,7 +426,7 @@ Repository → Database(demo.db,SQLite)
 - **前端不做风险 / 审批决策**:RiskEngine 分级、是否需要用户确认 / 人工审批、退款金额、执行与校验全部由后端决定;前端只把真实返回值呈现给用户与运营。
 - **`/chat`** 展示会话 + 右侧 Agent Trace(Intent / Route / RAG 来源 / Tool Provider / Risk / Approval / Verification / Final Response),让决策过程可理解(例如「为什么没有直接退款」→ 高风险 → 人工审批)。
 - **`/console`** 展示 Approval Queue、Risk Decision、Agent Action、订单权威状态与金额,提供 Approve / Reject;审批通过后展示 Resume → Execute → Verify 结果。
-- **`/evaluation`** 只保留基础结构(Reliability 分类 + AI Quality 标记 Planned / Lightweight MVP),**不伪造** accuracy / precision / recall 指标。
+- **`/evaluation`**(Phase 7C)运行固定数据集评测:执行真实 Agent 链路(隔离临时 DB),展示 Total / Passed / Failed、Intent / Entity / Route / Risk / Approval / Execution / Verification 七项指标与逐 case Expected / Actual,**不伪造**指标(详见 §23)。
 - **约束**:Demo 层不重写 AgentWorkflow / RiskEngine / ToolExecutor / MCP / HITL;会话与审批投影为进程内存储,演示用单 worker 后端;不把业务规则写进 UI。
 ## 22. LLM Provider Layer(Phase 7B 落地)
 
@@ -439,3 +441,52 @@ User → LLM(理解)→ Agent Workflow → RAG / Tool / MCP
 - **Deterministic 保留**:`LLM_ENABLED=false`(默认)或未配置 Key 时,`/chat` 走既有确定性 IntentClassifier / 规则路由 / Risk / Approval / Execute / Verify;任何一次 LLM 失败都回退确定性路径——高风险动作「宁可不执行,也不自动执行」。
 - **边界不变**:LLM 输出是 untrusted proposal;Risk Gate、用户确认、人工审批、Tool Executor / MCP Adapter 与权威 Business Service 仍是唯一执行与授权来源(Decision 040 / 041)。
 - **安全**:API Key 只存在于请求头,不进入日志、Trace、API 响应、异常或前端;Key 由 `Settings`(环境变量 / `.env`)提供,`.env` 已被 .gitignore 忽略。
+
+
+## 23. Evaluation + Observability(Phase 7C 落地)
+
+### 23.1 执行与授权链(面试口径)
+
+```text
+LLM(理解 / 提议,untrusted)
+ ↓
+Agent Workflow
+ ↓
+RAG / Tool / MCP(能力来源)
+ ↓
+Risk Gate(风险分级 + 门禁)
+ ↓
+User Confirmation / Human Approval(HITL)
+ ↓
+Business Service(确定性业务规则,唯一授权来源)
+ ↓
+Repository
+ ↓
+Database
+ ↓
+Verify(重查权威业务状态)
+ ↓
+Final Response
+```
+
+- **LLM 是不可信执行器。** LLM 只负责「理解」和「提议」(意图 / 实体 / 措辞);它不能直接修改数据库、不能绕过 Risk Gate、不能绕过 Approval、不能决定业务规则。任何一次 LLM 失败都安全回退到确定性流程,高风险动作「宁可不执行,也不自动执行」。
+- **Risk Gate 与 Business Rule 明确区分**:Risk Gate 只回答「这个操作要不要用户确认 / 人工审批」;Business Service 只回答「这个业务操作当前是否真的允许」。两者独立、可单独测试。
+- **Verify**:执行后重新读取权威业务状态(退款单存在且金额等于订单权威总额、订单状态确实变为 CANCELLED),不信任工具自报成功。
+
+### 23.2 Evaluation(轻量 MVP)
+
+- 固定数据集:`backend/app/evaluation/dataset.py`(9 类场景、11 个 case,含 Prompt Injection 与「不要人工审批」越权指令)。
+- Runner:在隔离临时 SQLite 上跑与 `/demo/chat` 完全相同的 `run_chat` / `finalize_approval`;`use_llm=false` 确定性离线,`use_llm=true` 走真实 DeepSeek。
+- 指标:Intent / Entity / Route / Risk / Approval / Execution / Verification 七项准确率;带显式预期的维度才计分,其余标记 N/A。
+- API:`GET/POST /api/v1/demo/evaluation/cases|run`;前端 `/evaluation` 展示 Summary + 指标 + Case Table(Expected vs Actual)。
+
+### 23.3 Observability / Trace(单机、非生产级)
+
+```text
+Request → Understand(Intent)→ Route → RAG / Tool / MCP
+        → Risk Gate → Approval → Execute → Verify → Final Response
+```
+
+- 每个 Agent 请求的 payload 即事件投影:`request_id / session_id / user_id / created_at / updated_at` + `steps`(Understand / Route / tool / Risk Gate / Human Approval / Execute / Verify / Finalize)+ `risk / approval / approval_resolution / sources / llm`。
+- AgentState 记录每次 Risk Gate 判定(`risk_decisions`),步骤带 status / summary / provider / result_data。
+- 边界:进程内存储、单 worker;禁止写入 API Key / Authorization / secret / 非必要个人信息;无分布式 tracing(保留 Phase 8)。

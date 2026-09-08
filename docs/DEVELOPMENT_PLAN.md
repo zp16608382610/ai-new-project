@@ -18,10 +18,12 @@
 - **Phase 6 — MCP:completed**(MCP MVP:内部 Tool Executor + MCP 工具并存;只暴露 get_order / get_logistics / create_ticket)
 - **Phase 7A — Frontend Demo Workbench:completed**(把已完成 Agent 能力做成可现场演示的产品 Demo:/chat + /console + /evaluation,前端纯展示层、真实调用后端 API)
 
-- **Phase 7B — Real DeepSeek LLM Integration:code completed / real API verification pending**(真实 DeepSeek 接入代码完成:LLM 只做意图/实体理解与最终回复生成,业务事实与风险执行仍由确定性 RAG / Tool / Risk / HITL 控制;默认 LLM_ENABLED=false;真实 DeepSeek 在线验证待配置 DEEPSEEK_API_KEY 后进行)
+- **Phase 7B — Real DeepSeek LLM Integration:completed**(真实 DeepSeek 接入完成,并已在本地演示环境以真实 API 在线验证;无 Key / CI / 断网时仍可 LLM_ENABLED=false 走确定性流程;默认 LLM_ENABLED=false)
 
 
-- **Phase 7C — Evaluation + Observability + Final Demo Packaging:planned**(下一阶段:五层评测与回归流程、端到端可观测与行为审计,以及最终演示打包 / 部署准备 / 验收与收尾)
+- **Phase 7C — Evaluation + Observability + Final Demo Packaging:completed**(固定数据集评测 + 单机 Trace + Final Demo 打包已落地;规模化评测 / 生产级可观测基座保留至 Phase 8)
+- **Phase 8 — Evaluation + Observability(规模化 / 生产级):not started**
+- **Phase 9 — Final Demo(现场彩排 / 验收 / 收尾):not started**
 
 ## Phase 1 — Foundation [COMPLETED]
 
@@ -200,9 +202,9 @@
 说明:Demo 会话 / 审批投影为进程内存储,后端需以单 worker 运行;不自动进入 Phase 7C。
 
 
-## Phase 7B — Real DeepSeek LLM Integration [CODE COMPLETED / REAL API VERIFICATION PENDING]
+## Phase 7B — Real DeepSeek LLM Integration [COMPLETED]
 
-代码已完成(Phase 7B 只做一件事:把真实 DeepSeek 接入现有 Agent,让 /chat 支持自然语言交互;不重写 Agent / Risk / Approval / Tools / MCP / Retrieval 核心);真实 DeepSeek 在线验证待配置 DEEPSEEK_API_KEY 后进行:
+真实 DeepSeek 接入已完成并在本地演示环境(配置 DEEPSEEK_API_KEY)以真实 API 验证通过(Phase 7B 只做一件事:把真实 DeepSeek 接入现有 Agent,让 /chat 支持自然语言交互;不重写 Agent / Risk / Approval / Tools / MCP / Retrieval 核心):
 - **LLM 抽象层**(backend/app/llm/):`base.py`(LLMProvider Protocol,轻量 OpenAI-compatible 接口)、`deepseek.py`(httpx 实现的 DeepSeek provider)、`errors.py`(LLM_TIMEOUT / LLM_AUTH_ERROR / LLM_RATE_LIMITED / LLM_PROVIDER_ERROR / LLM_INVALID_OUTPUT / LLM_CONFIG_ERROR 统一错误)、`prompts.py`(集中 System Prompt,不含任何 secret)、`nlu.py`(意图+实体结构化理解:严格 JSON → Pydantic 校验,失败即回退)、`respond.py`(最终回复生成:只消费 RAG ContextPackage / ToolResult 权威事实)
 - **配置**:新增 `LLM_ENABLED=false`(默认关闭)、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`(deepseek-chat)、`DEEPSEEK_BASE_URL`(https://api.deepseek.com);无 Key / 测试 / CI / 现场网络异常时 /chat 仍走确定性流程
 - **Agent 集成**(backend/app/agent/workflow.py 最小适配):可选注入 llm_intent / llm_responder;LLM 理解成功则用其 intent/entities 进入既有 RuleBasedRouter + 风险门,失败/输出非法则回退 DeterministicIntentClassifier / CLARIFY;`result.response` 承载 LLM 最终回复,确定性文本保留为兜底
@@ -213,10 +215,13 @@
 - **文档**:README 新增 LLM 配置章节;ARCHITECTURE.md §22(LLM Provider Layer);DECISIONS.md Decision 040 / 041
 
 
-## Phase 7C — Evaluation + Observability + Final Demo Packaging [PLANNED]
-- 检索/生成/Agent/工具/产品五层评测与回归流程(Evaluation 页接通)
-- 端到端 trace:request → model → state → retrieval → tool → result → answer(ToolResult metadata 已预留 execution_id / duration_ms 等)
-- 指标、日志聚合与行为审计
-- 端到端演示脚本与场景
-- 部署/发布准备(镜像、compose 完善、文档)
-- 验收与收尾
+## Phase 7C — Evaluation + Observability + Final Demo Packaging [COMPLETED]
+
+已完成(7C 只做三件事:Evaluation、Observability / Trace、Final Demo Packaging;不引入分布式 tracing / OTel / Kafka / Celery / Prometheus 等生产级基建):
+
+- **Evaluation(backend/app/evaluation/)**:固定数据集 `dataset.py` 覆盖 9 类场景(FAQ/RAG、订单、物流、取消、退款、越权、业务规则拒绝、信息缺失、Prompt Injection / 越权指令)共 11 个 case;runner 复用真实 `/demo/chat` 同一条链路(`run_chat` / `finalize_approval`)在**隔离的临时 SQLite** 上执行,退款/取消写操作不污染演示库;metrics 计算 7 项指标(Intent / Entity / Route / Risk / Approval / Execution / Verification Accuracy),仅对带明确预期的维度计分,不适用维度显式标记 N/A;输出含每 case expected / actual / failure_reason
+- **API**:`GET /api/v1/demo/evaluation/cases`、`POST /api/v1/demo/evaluation/run`(`use_llm=false` 为确定性离线模式,`use_llm=true` 走真实 DeepSeek)
+- **Observability / Trace**:AgentState 新增 `risk_decisions`(每次 Risk Gate 判定的 tool / level / action / policy / reason,可序列化);demo payload timeline 对已执行工具输出结构化 `Risk Gate` 步骤,保留 Tool(provider / result_data)→ Execute → Verify → Final Response 事件;禁止记录 API Key / secret(Decision 042)
+- **前端 `/evaluation`**:真实运行评测并展示 Summary(Total / Passed / Failed)、7 项指标率与 Case Table(点击展开 Expected vs Actual)
+- **Final Demo Packaging**:docs/FINAL_DEMO.md(8 个固定演示场景 + 面试讲解点 + Known Limitations)
+- **测试**:新增 11 例(tests/test_evaluation.py 7 例 + tests/test_trace_events.py 4 例),全套 **391 例全绿**;backend `compileall` 通过;前端 `npm run build` 通过

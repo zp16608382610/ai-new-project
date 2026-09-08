@@ -232,6 +232,9 @@ class AgentState:
     retrieved_context: ContextPackage | None = None
     tool_requests: tuple[ToolRequest, ...] = ()
     tool_results: tuple[dict[str, Any], ...] = ()
+    # Observability: every Risk Gate decision made for this request (Phase 7C).
+    # Each item mirrors RiskDecision.to_dict() plus the evaluated tool name.
+    risk_decisions: tuple[dict[str, Any], ...] = ()
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
@@ -264,6 +267,7 @@ class AgentState:
             "retrieved_context": context_summary,
             "tool_requests": [request.to_dict() for request in self.tool_requests],
             "tool_results": [dict(item) for item in self.tool_results],
+            "risk_decisions": [dict(item) for item in self.risk_decisions],
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
@@ -285,6 +289,9 @@ class AgentState:
             ),
             tool_results=tuple(
                 dict(item) for item in (data.get("tool_results") or [])
+            ),
+            risk_decisions=tuple(
+                dict(item) for item in (data.get("risk_decisions") or [])
             ),
             response=data.get("response"),
             error=data.get("error"),

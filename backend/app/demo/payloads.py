@@ -305,6 +305,33 @@ def _build_timeline(
         for step in tool_steps:
             steps.append(step)
 
+    # Phase 7C observability: replay every recorded Risk Gate decision as an
+    # explicit trace step. Waiting flows already render their gate through the
+    # dedicated branches below, so they are skipped here to avoid duplication.
+    if run_status not in (
+        AgentRunStatus.WAITING_USER_CONFIRMATION.value,
+        AgentRunStatus.WAITING_HUMAN_APPROVAL.value,
+    ):
+        for decision in state.risk_decisions:
+            level = str(decision.get("risk_level") or "")
+            action = str(decision.get("risk_action") or "")
+            steps.append(
+                {
+                    "label": "Risk Gate",
+                    "state": "waiting"
+                    if action in ("USER_CONFIRM", "HUMAN_APPROVAL")
+                    else "success",
+                    "detail": (
+                        f"{risk_level_label(level)} · "
+                        f"{_ACTION_LABEL.get(action, action)}"
+                    ),
+                    "risk_level": level,
+                    "risk_action": action,
+                    "policy_id": decision.get("policy_id"),
+                    "reason": decision.get("reason"),
+                }
+            )
+
     risk_blocks: list[JsonDict] = []
     approval_view = approval
     if run_status == AgentRunStatus.WAITING_HUMAN_APPROVAL.value and approval_view is not None:

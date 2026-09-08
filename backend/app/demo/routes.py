@@ -41,6 +41,18 @@ class ResolveRequest(BaseModel):
     resolved_by: str | None = Field(default="demo-operator", max_length=100)
 
 
+class EvaluationRunRequest(BaseModel):
+    """Request body for the Phase 7C Evaluation runner.
+
+    use_llm=False forces the deterministic offline agent path (default) so a
+    run is fast and repeatable; use_llm=True uses the configured DeepSeek
+    provider exactly like /demo/chat. case_ids filters the dataset.
+    """
+
+    use_llm: bool = False
+    case_ids: list[str] | None = None
+
+
 def _order_ref(value: Any) -> str | None:
     if value is None:
         return None
@@ -160,3 +172,49 @@ def _resolve(db: Session, approval_id: int, *, approved: bool, resolved_by: str)
     except Exception:
         approval = None
     return {"approval": approval, "run": run}
+
+# ---------------------------------------------------------------------------
+# Phase 7C Evaluation endpoints (isolated database, real agent workflow)
+# ---------------------------------------------------------------------------
+
+
+def _evaluation_case_summary(case) -> dict[str, Any]:
+    return {
+        "case_id": case.case_id,
+        "category": case.category,
+        "scenario": case.scenario,
+        "user_message": case.user_message,
+        "user_id": case.user_id,
+        "user_confirmed": case.user_confirmed,
+        "resolve_approval": case.resolve_approval,
+        "expected": {
+            "intent": case.expected_intent,
+            "route": case.expected_route,
+            "order_id": case.expected_order_id,
+            "risk_level": case.expected_risk_level,
+            "risk_action": case.expected_risk_action,
+            "requires_approval": case.expected_requires_approval,
+            "execution_success": case.expected_execution_success,
+            "verification_success": case.expected_verification_success,
+            "outcome": case.expected_outcome,
+        },
+    }
+
+
+@router.get("/evaluation/cases", summary="List the fixed Phase 7C evaluation dataset")
+def evaluation_cases() -> dict[str, Any]:
+    from app.evaluation.dataset import EVALUATION_DATASET
+
+    cases = [_evaluation_case_summary(case) for case in EVALUATION_DATASET]
+    return {"total": len(cases), "cases": cases}
+
+
+@router.post("/evaluation/run", summary="Run the evaluation dataset against the real agent")
+def evaluation_run(payload: EvaluationRunRequest) -> dict[str, Any]:
+    from app.evaluation.service import run_evaluation
+
+    try:
+        report = run_evaluation(case_ids=payload.case_ids, use_llm=payload.use_llm)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Evaluation run failed: {exc}") from exc
+    return report

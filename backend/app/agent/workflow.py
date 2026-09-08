@@ -558,6 +558,18 @@ class AgentWorkflow:
             request = plan.pop(0)
             state.status = WorkflowStage.TOOL_EXECUTION
             decision = self._evaluate_risk(state, request, results)
+            # Observability (Phase 7C): keep every Risk Gate decision on the
+            # AgentState so payloads/traces and the Evaluation runner can see
+            # the exact gate result for each tool request.
+            state.risk_decisions = state.risk_decisions + (
+                {
+                    "tool": request.tool_name,
+                    "risk_level": decision.risk_level.value,
+                    "risk_action": decision.action.value,
+                    "policy_id": decision.policy_id,
+                    "reason": decision.reason,
+                },
+            )
             if decision.action is RiskAction.AUTO_EXECUTE:
                 stop = self._execute_auto_or_confirmed(state, request, processed, results)
                 if stop is not None:

@@ -142,3 +142,86 @@ export interface ResolveResponse {
   approval: ApprovalItem;
   run: DemoRun;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7C Evaluation API contracts
+// ---------------------------------------------------------------------------
+
+export interface EvaluationExpected {
+  intent: string | null;
+  route: string | null;
+  order_id: string | null;
+  risk_level: string | null;
+  risk_action: string | null;
+  requires_approval: boolean | null;
+  execution_success: boolean | null;
+  verification_success: boolean | null;
+  outcome: string | null;
+}
+
+export interface EvaluationActual {
+  intent: string | null;
+  route: string | null;
+  order_id: string | null;
+  risk_level: string | null;
+  risk_action: string | null;
+  requires_approval: boolean | null;
+  execution_success: boolean | null;
+  verification_success: boolean | null;
+  outcome: string | null;
+  run_status?: string | null;
+  agent_status?: string | null;
+}
+
+export interface EvaluationCheck {
+  metric: string;
+  expected?: unknown;
+  actual?: unknown;
+  passed?: boolean | null;
+}
+
+export interface EvaluationCaseRow {
+  case_id: string;
+  category: string;
+  scenario: string;
+  user_message: string;
+  expected: EvaluationExpected;
+  actual: EvaluationActual;
+  status: "PASS" | "FAIL" | "N/A";
+  failure_reasons: string[];
+  checks?: EvaluationCheck[];
+}
+
+export interface EvaluationMetric {
+  label: string;
+  passed: number;
+  applicable: number;
+  total: number;
+  rate: number | null;
+}
+
+export interface EvaluationReport {
+  version: string;
+  ran_at: string;
+  mode: "deterministic" | "live";
+  llm_enabled: boolean;
+  total_cases: number;
+  passed: number;
+  failed: number;
+  na: number;
+  metrics: Record<string, EvaluationMetric>;
+  cases: EvaluationCaseRow[];
+}
+
+export interface EvaluationCaseMeta {
+  case_id: string;
+  category: string;
+  scenario: string;
+  user_message: string;
+  expected: EvaluationExpected;
+}
+
+export interface EvaluationCasesResponse {
+  total: number;
+  cases: EvaluationCaseMeta[];
+}

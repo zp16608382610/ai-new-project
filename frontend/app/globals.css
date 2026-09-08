@@ -732,3 +732,72 @@ body {
     max-height: 70vh;
   }
 }
+
+
+/* ---- Phase 7C Evaluation page ---- */
+.eval-run-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.8rem 0 1.2rem;
+  padding: 0.8rem 1rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+.eval-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+  color: #334155;
+  cursor: pointer;
+}
+.eval-summary-card {
+  padding: 0.9rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  margin: 0 0 1rem;
+}
+.eval-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.2rem;
+  align-items: center;
+  font-size: 0.95rem;
+}
+.eval-ok strong { color: #15803d; }
+.eval-bad strong { color: #b91c1c; }
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.7rem;
+  margin: 0 0 1.4rem;
+}
+.metric-tile {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.8rem;
+  text-align: center;
+}
+.metric-label { font-size: 0.82rem; color: #475569; }
+.metric-rate { font-size: 1.5rem; font-weight: 700; color: #1e1b4b; }
+.metric-detail { font-size: 0.75rem; margin-top: 0.15rem; }
+.case-table-section h2 { font-size: 1.05rem; margin: 0 0 0.6rem; }
+.case-table-wrap { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.case-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.case-table th, .case-table td { padding: 0.55rem 0.7rem; text-align: left; border-bottom: 1px solid #eef2f7; vertical-align: top; }
+.case-table thead th { background: #f1f5f9; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.02em; color: #475569; }
+.case-row { cursor: pointer; }
+.case-row:hover { background: #f8fafc; }
+.case-id { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; color: #4338ca; }
+.case-input { max-width: 320px; }
+.case-detail-row td { background: #fbfcfe; padding: 0.9rem 1rem; }
+.case-detail { display: flex; flex-direction: column; gap: 0.5rem; }
+.failure-list { margin: 0; padding-left: 1.1rem; color: #b91c1c; font-size: 0.85rem; }
+.expected-actual { border-collapse: collapse; margin-top: 0.3rem; max-width: 640px; font-size: 0.85rem; }
+.expected-actual th, .expected-actual td { border: 1px solid #e2e8f0; padding: 0.35rem 0.6rem; text-align: left; }
+.expected-actual th { background: #f1f5f9; }

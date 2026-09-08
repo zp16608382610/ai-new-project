@@ -98,13 +98,16 @@ def _database_url_of(session: Session) -> str | None:
         return None
 
 
-def _build_llm_components():
+def _build_llm_components(*, force_disabled: bool = False):
     """Return (llm_intent, llm_responder, enabled) from settings.
 
     LLM_ENABLED=false, an empty DEEPSEEK_API_KEY or any provider config error
     disables the LLM path: the Agent keeps running deterministically. No key is
-    ever logged or exposed.
+    ever logged or exposed. force_disabled is used by the Evaluation runner
+    so the deterministic (offline) agent path is graded without a live model.
     """
+    if force_disabled:
+        return None, None, False
     try:
         settings = get_settings()
     except Exception:
@@ -162,9 +165,16 @@ def run_chat(
     request_id: str | None = None,
     user_confirmed: bool | None = None,
     mcp_client: MCPClient | None = None,
+    use_llm: bool | None = None,
 ) -> dict[str, Any]:
-    """Run one user message through the real Agent workflow and store the run."""
-    llm_intent, llm_responder, llm_enabled = _build_llm_components()
+    """Run one user message through the real Agent workflow and store the run.
+
+    use_llm=False forces the deterministic offline path (used by the
+    Evaluation runner and by tests); the default honours the environment.
+    """
+    llm_intent, llm_responder, llm_enabled = _build_llm_components(
+        force_disabled=use_llm is False
+    )
     components = DemoComponents(
         session,
         mcp_client=mcp_client,
@@ -213,9 +223,12 @@ def finalize_approval(
     approved: bool,
     resolved_by: str | None = "demo-operator",
     mcp_client: MCPClient | None = None,
+    use_llm: bool | None = None,
 ) -> dict[str, Any]:
     """Resume the original ToolRequest after a human decision (real workflow)."""
-    llm_intent, llm_responder, llm_enabled = _build_llm_components()
+    llm_intent, llm_responder, llm_enabled = _build_llm_components(
+        force_disabled=use_llm is False
+    )
     components = DemoComponents(
         session,
         mcp_client=mcp_client,
