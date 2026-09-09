@@ -27,6 +27,24 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * Backend liveness probe. Render free instances sleep after ~15 minutes
+ * without inbound requests; this call wakes one and reports when it answers.
+ * Each probe is bounded so the UI can poll while the instance cold-starts.
+ */
+export async function fetchBackendHealth(timeoutMs = 10_000): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await requestJson("/health", { signal: controller.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,

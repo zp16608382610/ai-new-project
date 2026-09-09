@@ -159,3 +159,21 @@ Caddy 端口,或通过 Caddy 增加一个 Basic Auth 层(最小临时手段)。
 
 - SQLite 数据在 named volume 中,回滚镜像不影响已有 demo 数据;需要干净状态时
   按第 5 节重建。
+## 10. Render(免费托管)自动休眠说明
+
+本仓库同时在 Render 上部署了前端与后端两个免费 Web Service:
+
+- 前端:`https://ai-new-project-1.onrender.com/chat`
+- 后端:`https://ai-new-project-pavw.onrender.com`,健康检查
+  `GET /api/v1/health` → `{"status": "ok"}`
+
+Render 免费实例在约 **15 分钟无入站请求后会自动休眠**;下一次请求会触发冷启动
+(通常 30–60 秒),若前端代理请求在冷启动完成前超时,会表现为聊天提问报
+“请求失败 / 无法连接”。处理方式:
+
+- 聊天前端(`frontend/app/chat/ChatClient.tsx`)已内置自动唤醒:页面打开与发消息前
+  会探测 `/api/v1/health`,未就绪时轮询并显示“正在唤醒后端…”,失败(502/503/504)
+  的提问会在后端恢复后自动重发一次,无需手动打开后端地址。
+- 保活:`.github/workflows/keep-alive.yml` 每 10 分钟 ping 一次前后端 URL,
+  使免费实例基本不进入休眠;也可用 UptimeRobot 等外部监控替代。
+- 彻底解决:将实例升级到 Render 付费档(不自动休眠)。

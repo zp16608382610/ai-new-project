@@ -5,9 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   ApiRequestError,
+  fetchBackendHealth,
   sendChat,
   fetchSessionRuns,
 } from "@/lib/api";
+import type { ChatPayload } from "@/lib/api";
 import type { DemoRun, RetrievedSource } from "@/lib/types";
 
 const CURRENT_USER = {
@@ -24,6 +26,29 @@ const QUICK_ACTIONS: { label: string; text: string }[] = [
   { label: "取消订单", text: "帮我取消订单 ORD-1002" },
   { label: "创建售后工单", text: "收到货有破损，帮我创建一个售后工单（订单 ORD-1001）" },
 ];
+
+const WAKE_POLL_INTERVAL_MS = 3_000;
+const WAKE_TIMEOUT_MS = 120_000;
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Render free instances surface gateway errors while a sleeping instance boots. */
+function isBackendBootingError(err: unknown): boolean {
+  if (err instanceof ApiRequestError) {
+    return err.status === 502 || err.status === 503 || err.status === 504;
+  }
+  return (
+    err instanceof TypeError ||
+    (err instanceof DOMException && err.name === "AbortError")
+  );
+}
+
+function describeApiError(err: unknown): string {
+  return err instanceof ApiRequestError
+    ? err.message
+    : "无法连接后端服务，请确认后端已启动。";
+}
 
 /** Friendly route label used in the trace header. */
 const ROUTE_LABEL: Record<string, string> = {
@@ -72,8 +97,14 @@ export default function ChatClient() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [backendReady, setBackendReady] = useState<boolean | null>(null);
+  const [waking, setWaking] = useState(false);
+  const mountedRef = useRef(true);
+  const wakeSeqRef = useRef(0);
+  const warmupStartedRef = useRef(false);
 
   const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
+  const busy = sending || waking;
 
   const refreshHistory = useCallback(
     async (sid: string) => {
@@ -83,15 +114,139 @@ export default function ChatClient() {
     [],
   );
 
+  const storeRun = useCallback(
+    async (run: DemoRun) => {
+      const sid = run.session_id || sessionId;
+      if (sid) {
+        setSessionId(sid);
+        await refreshHistory(sid);
+      } else {
+        setRuns((previous) => [...previous, run]);
+      }
+    },
+    [sessionId, refreshHistory],
+  );
+
+  const probeBackend = useCallback(async (): Promise<boolean> => {
+    const ok = await fetchBackendHealth();
+    setBackendReady(ok);
+    return ok;
+  }, []);
+
+  const wakeBackend = useCallback(async (): Promise<boolean> => {
+    const seq = ++wakeSeqRef.current;
+    setWaking(true);
+    const deadline = Date.now() + WAKE_TIMEOUT_MS;
+    try {
+      while (Date.now() < deadline) {
+        if (!mountedRef.current || wakeSeqRef.current !== seq) {
+          return false;
+        }
+        if (await probeBackend()) {
+          return true;
+        }
+        if (!mountedRef.current || wakeSeqRef.current !== seq) {
+          return false;
+        }
+        await sleep(WAKE_POLL_INTERVAL_MS);
+      }
+      setBackendReady(false);
+      return false;
+    } finally {
+      if (wakeSeqRef.current === seq) {
+        setWaking(false);
+      }
+    }
+  }, [probeBackend]);
+
+  const ensureBackendReady = useCallback(async (): Promise<boolean> => {
+    if (backendReady === true) {
+      return true;
+    }
+    if (await probeBackend()) {
+      return true;
+    }
+    return wakeBackend();
+  }, [backendReady, probeBackend, wakeBackend]);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [runs, sending]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Render 免费实例约 15 分钟无请求会休眠:打开页面即静默探测并预热后端,
+  // 避免第一条消息直接撞上冷启动(冷启动时会显示“正在唤醒后端”)。
+  useEffect(() => {
+    if (warmupStartedRef.current) {
+      return;
+    }
+    warmupStartedRef.current = true;
+    void ensureBackendReady();
+  }, [ensureBackendReady]);
+
+  const attemptChat = useCallback(
+    async (payload: ChatPayload): Promise<"ok" | "boot" | "failed"> => {
+      let run: DemoRun;
+      try {
+        run = await sendChat(payload);
+      } catch (err) {
+        if (isBackendBootingError(err)) {
+          return "boot";
+        }
+        setError(describeApiError(err));
+        return "failed";
+      }
+      try {
+        await storeRun(run);
+      } catch {
+        setError("消息已发出，但会话记录刷新失败，请刷新页面查看。");
+        return "failed";
+      }
+      return "ok";
+    },
+    [storeRun],
+  );
+
+  const sendInner = useCallback(
+    async (text: string, confirmed?: boolean) => {
+      const payload: ChatPayload = {
+        message: text,
+        user_id: CURRENT_USER.id,
+        session_id: sessionId ?? undefined,
+        user_confirmed: confirmed,
+      };
+      const first = await attemptChat(payload);
+      if (first === "ok") {
+        return;
+      }
+      if (first !== "boot") {
+        return; // attemptChat 已显示具体错误
+      }
+      // 发送瞬间后端休眠(距上次请求超过约 15 分钟):唤醒后自动重发一次。
+      const ready = await ensureBackendReady();
+      if (!ready) {
+        setError("后端仍在启动中，请稍候再试。");
+        return;
+      }
+      const retried = await attemptChat(payload);
+      if (retried === "boot") {
+        setError("后端暂时不可用，请稍候重试。");
+      }
+    },
+    [attemptChat, ensureBackendReady, sessionId],
+  );
+
   const send = useCallback(
     async (message: string, confirmed?: boolean) => {
-      if (!message.trim() || sending) {
+      if (!message.trim() || busy) {
         return;
       }
       const text = message.trim();
@@ -99,30 +254,19 @@ export default function ChatClient() {
       setError(null);
       setSending(true);
       try {
-        const run = await sendChat({
-          message: text,
-          user_id: CURRENT_USER.id,
-          session_id: sessionId ?? undefined,
-          user_confirmed: confirmed,
-        });
-        const sid = run.session_id || sessionId;
-        if (sid) {
-          setSessionId(sid);
-          await refreshHistory(sid);
-        } else {
-          setRuns((previous) => [...previous, run]);
+        if (backendReady !== true) {
+          const ready = await wakeBackend();
+          if (!ready) {
+            setError("后端仍在启动中，请稍候再试。");
+            return;
+          }
         }
-      } catch (err) {
-        if (err instanceof ApiRequestError) {
-          setError(err.message);
-        } else {
-          setError("无法连接后端服务，请确认 FastAPI 已在 http://127.0.0.1:8000 启动。");
-        }
+        await sendInner(text, confirmed);
       } finally {
         setSending(false);
       }
     },
-    [sending, sessionId, refreshHistory],
+    [busy, backendReady, wakeBackend, sendInner],
   );
 
   const confirmOn = (message: string) => {
@@ -186,7 +330,7 @@ export default function ChatClient() {
                         <button
                           type="button"
                           className="btn btn-primary"
-                          disabled={sending}
+                          disabled={busy}
                           onClick={() => confirmOn(run.user_message ?? "")}
                         >
                           确认，继续执行
@@ -194,7 +338,7 @@ export default function ChatClient() {
                         <button
                           type="button"
                           className="btn"
-                          disabled={sending}
+                          disabled={busy}
                           onClick={() => dismissOn(run.user_message ?? "")}
                         >
                           取消操作
@@ -217,7 +361,16 @@ export default function ChatClient() {
               </div>
             ))}
 
-            {sending ? (
+            {waking ? (
+              <div className="message-row assistant">
+                <div className="loading-row">
+                  <span className="spinner" aria-hidden="true" />
+                  正在唤醒后端（Render 免费实例休眠后冷启动约需 30–60 秒）…
+                </div>
+              </div>
+            ) : null}
+
+            {sending && !waking ? (
               <div className="message-row assistant">
                 <div className="loading-row">
                   <span className="spinner" aria-hidden="true" />
@@ -239,7 +392,7 @@ export default function ChatClient() {
                 key={action.label}
                 type="button"
                 className="chip"
-                disabled={sending}
+                disabled={busy}
                 onClick={() => void send(action.text)}
               >
                 {action.label}
@@ -256,7 +409,7 @@ export default function ChatClient() {
           >
             <textarea
               value={input}
-              disabled={sending}
+              disabled={busy}
               placeholder="输入你的问题，例如：退款需要满足什么条件？"
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
@@ -267,7 +420,7 @@ export default function ChatClient() {
               }}
               rows={2}
             />
-            <button type="submit" className="btn btn-primary" disabled={sending || !input.trim()}>
+            <button type="submit" className="btn btn-primary" disabled={busy || !input.trim()}>
               发送
             </button>
           </form>
