@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -41,6 +42,13 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         debug=settings.debug,
         lifespan=lifespan,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://ai-new-project-1.onrender.com"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+        allow_credentials=False,
     )
     application.include_router(health.router, prefix=settings.api_v1_prefix)
     application.include_router(orders.order_router, prefix=settings.api_v1_prefix)

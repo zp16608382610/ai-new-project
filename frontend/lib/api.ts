@@ -14,7 +14,8 @@ import type {
   ResolveResponse,
 } from "./types";
 
-const API_BASE = "/api/v1";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/v1";
 
 export class ApiRequestError extends Error {
   readonly code?: string;
