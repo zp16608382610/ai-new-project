@@ -28,8 +28,8 @@ const QUICK_ACTIONS: { label: string; text: string }[] = [
 ];
 
 const WAKE_POLL_INTERVAL_MS = 3_000;
-const HEALTH_PROBE_TIMEOUT_MS = 20_000;
-const WAKE_TOTAL_TIMEOUT_MS = 120_000;
+const HEALTH_PROBE_TIMEOUT_MS = 90_000;
+const WAKE_TOTAL_TIMEOUT_MS = 240_000;
 const WAKE_TOTAL_SECONDS = WAKE_TOTAL_TIMEOUT_MS / 1000;
 const STARTUP_MESSAGE = "AI 服务正在启动，首次加载可能需要 30–60 秒，请稍候…";
 

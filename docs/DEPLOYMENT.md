@@ -172,12 +172,14 @@ Render 免费实例在约 **15 分钟无入站请求后会自动休眠**;下一�
 “请求失败 / 无法连接”。处理方式:
 
 - 聊天前端(`frontend/app/chat/ChatClient.tsx`)已内置自动唤醒:页面打开即请求同源
-  `/api/v1/health`(经 Next.js rewrite 转发到后端),未就绪时在约 **120 秒**总时限内
-  串行轮询(单次请求最长 20 秒),全程显示“AI 服务正在启动,首次加载可能需要 30–60 秒,
+  `/api/v1/health`(经 Next.js rewrite 转发到后端),未就绪时在约 **240 秒**总时限内
+  串行轮询(单次请求最长 90 秒),全程显示“AI 服务正在启动,首次加载可能需要 30–60 秒,
   请稍候…”并禁用发送;只有超过最大等待时间才展示失败与“重试连接”。后端就绪前绝不
   直接 POST `/api/v1/demo/chat`。发送瞬间后端再次休眠时,只对“确认请求未到达后端”的
   冷启动失败(网关 5xx 且无 JSON body)唤醒后自动重发一次;网络中断/超时等无法确认的
   失败绝不重复提交业务请求。整个过程无需手动访问后端地址或 `/health`。
-- 保活:`.github/workflows/keep-alive.yml` 每 10 分钟 ping 一次前后端 URL,
-  使免费实例基本不进入休眠;也可用 UptimeRobot 等外部监控替代。
+- 保活:`.github/workflows/keep-alive.yml` 每 10 分钟 ping 一次后端直连 URL 与前端
+  `/api/v1/health`(经 Next.js rewrite 转发到后端,真正验证并唤醒后端)。GitHub Actions
+  keep-alive 只是辅助措施,不保证 Render Free 实例永久在线(定时任务可能延迟或停跑);
+  前端页面内的自动唤醒才是主要的恢复机制。也可用 UptimeRobot 等外部监控替代。
 - 彻底解决:将实例升级到 Render 付费档(不自动休眠)。

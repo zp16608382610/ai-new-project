@@ -1,5 +1,6 @@
 # Render 免费(Free)Web Service 在约 15 分钟无入站请求后会自动休眠。
-# 本工作流每 10 分钟 ping 一次前后端 URL,避免用户提问时撞上后端冷启动。
+# 本工作流每 10 分钟 ping 一次后端直连 URL 与前端 /api/v1/health
+# (经 Next.js rewrite 转发到后端,真正验证并唤醒后端),避免用户提问时撞上后端冷启动。
 # 手动触发:仓库 Actions 页 → “Render keep-alive” → Run workflow。
 name: Render keep-alive
 
@@ -27,8 +28,8 @@ jobs:
           curl -sS -m 60 -L -o /dev/null -w "backend /api/v1/health -> HTTP %{http_code} (%{time_total}s)\n" \
             https://ai-new-project-pavw.onrender.com/api/v1/health || true
 
-      - name: Ping frontend chat page
+      - name: Ping frontend health (wakes backend via rewrite)
         continue-on-error: true
         run: |
-          curl -sS -m 60 -L -o /dev/null -w "frontend /chat -> HTTP %{http_code} (%{time_total}s)\n" \
-            https://ai-new-project-1.onrender.com/chat || true
+          curl -sS -m 60 -L -o /dev/null -w "frontend /api/v1/health -> HTTP %{http_code} (%{time_total}s)\n" \
+            https://ai-new-project-1.onrender.com/api/v1/health || true
