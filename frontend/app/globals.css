@@ -327,6 +327,31 @@ body {
   }
 }
 
+.startup-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.6rem 0.75rem 0;
+  padding: 0.55rem 0.85rem;
+  border-radius: 0.5rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #78350f;
+}
+
+.startup-banner .btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.startup-banner-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
 /* ---- Trace panel ---- */
 
 .trace-pane {

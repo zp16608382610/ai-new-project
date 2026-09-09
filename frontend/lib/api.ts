@@ -19,30 +19,80 @@ const API_BASE = "/api/v1";
 export class ApiRequestError extends Error {
   readonly code?: string;
   readonly status: number;
+  /** True when the error response contained a parseable JSON body. */
+  readonly hasJsonBody: boolean;
 
-  constructor(status: number, detail: string, code?: string) {
+  constructor(status: number, detail: string, code?: string, hasJsonBody = false) {
     super(detail);
     this.status = status;
     this.code = code;
+    this.hasJsonBody = hasJsonBody;
   }
 }
 
 /**
- * Backend liveness probe. Render free instances sleep after ~15 minutes
- * without inbound requests; this call wakes one and reports when it answers.
- * Each probe is bounded so the UI can poll while the instance cold-starts.
+ * Liveness probe for the Render-free backend.
+ *
+ * Render free instances sleep after ~15 minutes without inbound requests and
+ * take 30-60+ seconds to cold-start. A single request can therefore time out
+ * or hit a gateway 5xx before the app answers, so this function is designed to
+ * be polled by the caller:
+ *
+ * - every call is bounded by `timeoutMs` (AbortController), so one probe can
+ *   never hang forever;
+ * - it never throws; it returns a classified `BackendHealthResult` instead
+ *   ("starting" = Render is still booting, "timeout"/"network" = transient,
+ *   "unavailable" = the backend answered but is not usable).
+ *
+ * The caller owns the overall deadline and the pacing between probes.
  */
-export async function fetchBackendHealth(timeoutMs = 10_000): Promise<boolean> {
+export type BackendHealthKind =
+  | "starting"
+  | "timeout"
+  | "network"
+  | "unavailable";
+
+export type BackendHealthResult =
+  | { ok: true; kind: "ok" }
+  | { ok: false; kind: BackendHealthKind; httpStatus?: number };
+
+export async function fetchBackendHealth(
+  timeoutMs = 20_000,
+): Promise<BackendHealthResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     await requestJson("/health", { signal: controller.signal });
-    return true;
-  } catch {
-    return false;
+    return { ok: true, kind: "ok" };
+  } catch (err) {
+    return classifyHealthError(err);
   } finally {
     clearTimeout(timer);
   }
+}
+
+function classifyHealthError(err: unknown): BackendHealthResult {
+  if (err instanceof ApiRequestError) {
+    // Render / Next rewrite answers 5xx without a JSON body while the sleeping
+    // instance is still booting (the app was not reached yet). Keep polling.
+    if (
+      err.status === 500 ||
+      err.status === 502 ||
+      err.status === 503 ||
+      err.status === 504
+    ) {
+      return { ok: false, kind: "starting", httpStatus: err.status };
+    }
+    // The backend answered but is not usable (e.g. route/authorization error).
+    return { ok: false, kind: "unavailable", httpStatus: err.status };
+  }
+  if (err instanceof DOMException && err.name === "AbortError") {
+    return { ok: false, kind: "timeout" };
+  }
+  if (err instanceof TypeError) {
+    return { ok: false, kind: "network" };
+  }
+  return { ok: false, kind: "network" };
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -74,6 +124,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
       response.status,
       detail,
       typeof errorBody.code === "string" ? errorBody.code : undefined,
+      body !== null,
     );
   }
 

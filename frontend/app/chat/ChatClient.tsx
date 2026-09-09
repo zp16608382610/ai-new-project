@@ -9,7 +9,7 @@ import {
   sendChat,
   fetchSessionRuns,
 } from "@/lib/api";
-import type { ChatPayload } from "@/lib/api";
+import type { BackendHealthResult, ChatPayload } from "@/lib/api";
 import type { DemoRun, RetrievedSource } from "@/lib/types";
 
 const CURRENT_USER = {
@@ -28,26 +28,55 @@ const QUICK_ACTIONS: { label: string; text: string }[] = [
 ];
 
 const WAKE_POLL_INTERVAL_MS = 3_000;
-const WAKE_TIMEOUT_MS = 120_000;
+const HEALTH_PROBE_TIMEOUT_MS = 20_000;
+const WAKE_TOTAL_TIMEOUT_MS = 120_000;
+const WAKE_TOTAL_SECONDS = WAKE_TOTAL_TIMEOUT_MS / 1000;
+const STARTUP_MESSAGE = "AI 服务正在启动，首次加载可能需要 30–60 秒，请稍候…";
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Render free instances surface gateway errors while a sleeping instance boots. */
-function isBackendBootingError(err: unknown): boolean {
+type ChatFailureKind = "cold_start" | "ambiguous" | "app_error";
+
+/**
+ * Classify a failed chat POST:
+ * - "cold_start": the gateway answered 5xx without a JSON body, so the request
+ *   never reached the Agent; waking once and retrying once is safe.
+ * - "ambiguous": a network/timeout failure where we cannot prove the backend
+ *   did NOT process the request; never auto-resubmit here.
+ * - "app_error": the backend itself answered (JSON body or non-gateway status).
+ */
+function classifyChatFailure(err: unknown): ChatFailureKind {
   if (err instanceof ApiRequestError) {
-    return err.status === 502 || err.status === 503 || err.status === 504;
+    const isGatewayStatus =
+      err.status === 500 ||
+      err.status === 502 ||
+      err.status === 503 ||
+      err.status === 504;
+    if (isGatewayStatus && !err.hasJsonBody) {
+      return "cold_start";
+    }
+    return "app_error";
   }
-  return (
-    err instanceof TypeError ||
-    (err instanceof DOMException && err.name === "AbortError")
-  );
+  return "ambiguous";
 }
 
-function describeApiError(err: unknown): string {
-  return err instanceof ApiRequestError
-    ? err.message
-    : "无法连接后端服务，请确认后端已启动。";
+function chatErrorMessage(err: unknown): string {
+  if (err instanceof ApiRequestError) {
+    if (err.hasJsonBody && err.message) {
+      return `请求未完成：${err.message}`;
+    }
+    return `请求未完成（HTTP ${err.status}），请稍后重试。`;
+  }
+  return "网络暂时失败，无法连接后端服务。";
+}
+
+/** Final message shown only after the whole wake window has been exhausted. */
+function wakeTimeoutMessage(lastProbe: BackendHealthResult): string {
+  if (!lastProbe.ok && lastProbe.kind === "unavailable") {
+    return `后端已响应但状态异常（HTTP ${lastProbe.httpStatus ?? "-"}），已自动等待约 ${WAKE_TOTAL_SECONDS} 秒仍不可用。请确认后端健康检查正常后重试。`;
+  }
+  return `已自动等待约 ${WAKE_TOTAL_SECONDS} 秒，后端仍未完成冷启动（Render 免费实例冷启动较慢或暂时不可达）。请点击下方“重试连接”，无需手动访问后端。`;
 }
 
 /** Friendly route label used in the trace header. */
@@ -98,10 +127,12 @@ export default function ChatClient() {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
-  const [waking, setWaking] = useState(false);
+  const [waking, setWaking] = useState(true);
+  const [wakeFailure, setWakeFailure] = useState<string | null>(null);
   const mountedRef = useRef(true);
-  const wakeSeqRef = useRef(0);
   const warmupStartedRef = useRef(false);
+  const probeInFlightRef = useRef<Promise<BackendHealthResult> | null>(null);
+  const wakeInFlightRef = useRef<Promise<boolean> | null>(null);
 
   const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
   const busy = sending || waking;
@@ -127,47 +158,90 @@ export default function ChatClient() {
     [sessionId, refreshHistory],
   );
 
-  const probeBackend = useCallback(async (): Promise<boolean> => {
-    const ok = await fetchBackendHealth();
-    setBackendReady(ok);
-    return ok;
-  }, []);
+  // Single-flight health probe: concurrent callers share one in-flight request
+  // instead of firing overlapping /api/v1/health polls.
+  const probeBackend = useCallback(
+    (timeoutMs: number): Promise<BackendHealthResult> => {
+      if (probeInFlightRef.current) {
+        return probeInFlightRef.current;
+      }
+      const probe = fetchBackendHealth(timeoutMs).finally(() => {
+        if (probeInFlightRef.current === probe) {
+          probeInFlightRef.current = null;
+        }
+      });
+      probeInFlightRef.current = probe;
+      return probe;
+    },
+    [],
+  );
 
-  const wakeBackend = useCallback(async (): Promise<boolean> => {
-    const seq = ++wakeSeqRef.current;
-    setWaking(true);
-    const deadline = Date.now() + WAKE_TIMEOUT_MS;
-    try {
-      while (Date.now() < deadline) {
-        if (!mountedRef.current || wakeSeqRef.current !== seq) {
-          return false;
-        }
-        if (await probeBackend()) {
-          return true;
-        }
-        if (!mountedRef.current || wakeSeqRef.current !== seq) {
-          return false;
-        }
-        await sleep(WAKE_POLL_INTERVAL_MS);
-      }
-      setBackendReady(false);
-      return false;
-    } finally {
-      if (wakeSeqRef.current === seq) {
-        setWaking(false);
-      }
+  // Single-flight wake: page-open auto-wake, manual retry and the one safe chat
+  // retry all share the same in-flight wake, so no two poll loops can overlap
+  // (StrictMode double effects included). Total wait is capped at
+  // WAKE_TOTAL_TIMEOUT_MS; the last probe is shrunk to the remaining budget.
+  const startWake = useCallback((): Promise<boolean> => {
+    if (wakeInFlightRef.current) {
+      return wakeInFlightRef.current;
     }
+    setWaking(true);
+    const wake = (async (): Promise<boolean> => {
+      let lastProbe: BackendHealthResult = { ok: false, kind: "timeout" };
+      const deadline = Date.now() + WAKE_TOTAL_TIMEOUT_MS;
+      try {
+        while (mountedRef.current) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            break;
+          }
+          lastProbe = await probeBackend(
+            Math.min(HEALTH_PROBE_TIMEOUT_MS, remaining),
+          );
+          if (!mountedRef.current) {
+            return false;
+          }
+          if (lastProbe.ok) {
+            setBackendReady(true);
+            setWakeFailure(null);
+            return true;
+          }
+          // Backend answered but is unusable: polling more cannot help.
+          if (lastProbe.kind === "unavailable") {
+            break;
+          }
+          const pause = Math.min(
+            WAKE_POLL_INTERVAL_MS,
+            Math.max(0, deadline - Date.now()),
+          );
+          if (pause <= 0) {
+            break;
+          }
+          await sleep(pause);
+        }
+        if (mountedRef.current) {
+          setBackendReady(false);
+          setWakeFailure(wakeTimeoutMessage(lastProbe));
+        }
+        return false;
+      } finally {
+        if (mountedRef.current) {
+          setWaking(false);
+        }
+      }
+    })();
+    const run = wake.finally(() => {
+      if (wakeInFlightRef.current === wake) {
+        wakeInFlightRef.current = null;
+      }
+    });
+    wakeInFlightRef.current = run;
+    return run;
   }, [probeBackend]);
 
-  const ensureBackendReady = useCallback(async (): Promise<boolean> => {
-    if (backendReady === true) {
-      return true;
-    }
-    if (await probeBackend()) {
-      return true;
-    }
-    return wakeBackend();
-  }, [backendReady, probeBackend, wakeBackend]);
+  const retryWake = useCallback(() => {
+    setWakeFailure(null);
+    void startWake();
+  }, [startWake]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -182,32 +256,44 @@ export default function ChatClient() {
     };
   }, []);
 
-  // Render 免费实例约 15 分钟无请求会休眠:打开页面即静默探测并预热后端,
-  // 避免第一条消息直接撞上冷启动(冷启动时会显示“正在唤醒后端”)。
+  // Render 免费实例约 15 分钟无请求会休眠。页面一打开即自动唤醒:发出同源
+  // /api/v1/health(经 Next rewrite 转发到后端),health 未就绪时在总体时限内
+  // 串行轮询。整个过程不阻塞页面渲染,只显示启动状态并禁用发送;只在超过
+  // 最大等待时间后才展示失败信息。warmupStartedRef + 单飞 startWake 共同保证
+  // React StrictMode / 重复挂载不会启动第二个轮询。
   useEffect(() => {
     if (warmupStartedRef.current) {
       return;
     }
     warmupStartedRef.current = true;
-    void ensureBackendReady();
-  }, [ensureBackendReady]);
+    void startWake();
+  }, [startWake]);
 
   const attemptChat = useCallback(
-    async (payload: ChatPayload): Promise<"ok" | "boot" | "failed"> => {
+    async (payload: ChatPayload): Promise<"ok" | "cold_start" | "failed"> => {
       let run: DemoRun;
       try {
         run = await sendChat(payload);
       } catch (err) {
-        if (isBackendBootingError(err)) {
-          return "boot";
+        const kind = classifyChatFailure(err);
+        if (kind === "cold_start") {
+          // Gateway 5xx without a JSON body: the request never reached the
+          // Agent, so waking the backend and retrying once is safe.
+          return "cold_start";
         }
-        setError(describeApiError(err));
+        setError(
+          kind === "ambiguous"
+            ? "网络中断或请求超时，无法确认后端是否已处理该消息。为避免重复操作，请先查看会话历史，不要直接重发。"
+            : chatErrorMessage(err),
+        );
         return "failed";
       }
       try {
         await storeRun(run);
       } catch {
-        setError("消息已发出，但会话记录刷新失败，请刷新页面查看。");
+        // The business request already succeeded; only the history refresh
+        // failed. Never re-submit a business request in this case.
+        setError("消息已成功处理，但会话记录刷新失败。请勿重复发送，刷新页面即可看到最新会话。");
         return "failed";
       }
       return "ok";
@@ -227,21 +313,26 @@ export default function ChatClient() {
       if (first === "ok") {
         return;
       }
-      if (first !== "boot") {
-        return; // attemptChat 已显示具体错误
+      if (first !== "cold_start") {
+        return; // attemptChat 已显示具体错误,不自动重发。
       }
-      // 发送瞬间后端休眠(距上次请求超过约 15 分钟):唤醒后自动重发一次。
-      const ready = await ensureBackendReady();
+      // 后端在两次请求之间再次休眠(距上次请求约 15 分钟):唤醒后最多安全重发
+      // 一次。只有“确认请求未到达后端”的冷启动失败才会走到这里。
+      const ready = await startWake();
       if (!ready) {
-        setError("后端仍在启动中，请稍候再试。");
+        if (mountedRef.current) {
+          setError("后端未能在等待时间内就绪，本次消息未发送。后端恢复后请重新发送。");
+        }
         return;
       }
       const retried = await attemptChat(payload);
-      if (retried === "boot") {
-        setError("后端暂时不可用，请稍候重试。");
+      if (retried === "cold_start") {
+        if (mountedRef.current) {
+          setError("后端刚恢复又暂时不可用，本次消息未发送。请稍后重试。");
+        }
       }
     },
-    [attemptChat, ensureBackendReady, sessionId],
+    [attemptChat, startWake, sessionId],
   );
 
   const send = useCallback(
@@ -254,19 +345,14 @@ export default function ChatClient() {
       setError(null);
       setSending(true);
       try {
-        if (backendReady !== true) {
-          const ready = await wakeBackend();
-          if (!ready) {
-            setError("后端仍在启动中，请稍候再试。");
-            return;
-          }
-        }
+        // Inputs stay disabled until backendReady === true, so this path only
+        // runs when health already succeeded; sendInner handles a re-sleep.
         await sendInner(text, confirmed);
       } finally {
         setSending(false);
       }
     },
-    [busy, backendReady, wakeBackend, sendInner],
+    [busy, sendInner],
   );
 
   const confirmOn = (message: string) => {
@@ -296,6 +382,33 @@ export default function ChatClient() {
               {" · "}Session：<span className="mono">{sessionId ?? "等待首次消息自动创建"}</span>
             </div>
           </div>
+
+          {backendReady !== true ? (
+            <div
+              className={`startup-banner${waking ? "" : " startup-banner-error"}`}
+              role={waking ? "status" : "alert"}
+            >
+              {waking ? (
+                <>
+                  <span className="spinner" aria-hidden="true" />
+                  <span>
+                    {STARTUP_MESSAGE}
+                    <br />
+                    <span className="muted">
+                      无需手动访问后端，页面会自动等待并重试。
+                    </span>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>{wakeFailure ?? "后端尚未就绪。"}</span>
+                  <button type="button" className="btn" onClick={retryWake}>
+                    重试连接
+                  </button>
+                </>
+              )}
+            </div>
+          ) : null}
 
           <div className="chat-scroll" ref={scrollRef}>
             {runs.length === 0 && !sending ? (
@@ -330,7 +443,7 @@ export default function ChatClient() {
                         <button
                           type="button"
                           className="btn btn-primary"
-                          disabled={busy}
+                          disabled={busy || backendReady !== true}
                           onClick={() => confirmOn(run.user_message ?? "")}
                         >
                           确认，继续执行
@@ -338,7 +451,7 @@ export default function ChatClient() {
                         <button
                           type="button"
                           className="btn"
-                          disabled={busy}
+                          disabled={busy || backendReady !== true}
                           onClick={() => dismissOn(run.user_message ?? "")}
                         >
                           取消操作
@@ -360,15 +473,6 @@ export default function ChatClient() {
                 ) : null}
               </div>
             ))}
-
-            {waking ? (
-              <div className="message-row assistant">
-                <div className="loading-row">
-                  <span className="spinner" aria-hidden="true" />
-                  正在唤醒后端（Render 免费实例休眠后冷启动约需 30–60 秒）…
-                </div>
-              </div>
-            ) : null}
 
             {sending && !waking ? (
               <div className="message-row assistant">
@@ -392,7 +496,7 @@ export default function ChatClient() {
                 key={action.label}
                 type="button"
                 className="chip"
-                disabled={busy}
+                disabled={busy || backendReady !== true}
                 onClick={() => void send(action.text)}
               >
                 {action.label}
@@ -409,7 +513,7 @@ export default function ChatClient() {
           >
             <textarea
               value={input}
-              disabled={busy}
+              disabled={busy || backendReady !== true}
               placeholder="输入你的问题，例如：退款需要满足什么条件？"
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
@@ -420,7 +524,7 @@ export default function ChatClient() {
               }}
               rows={2}
             />
-            <button type="submit" className="btn btn-primary" disabled={busy || !input.trim()}>
+            <button type="submit" className="btn btn-primary" disabled={busy || backendReady !== true || !input.trim()}>
               发送
             </button>
           </form>
