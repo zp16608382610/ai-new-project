@@ -147,6 +147,19 @@ class TicketRepository(BaseRepository):
         stmt = select(Ticket).where(Ticket.user_id == user_id).order_by(Ticket.id)
         return list(self._session.scalars(stmt))
 
+    def list_by_case(self, case_db_id: int) -> list[Ticket]:
+        """Tickets raised for one after-sales case (Phase 9D idempotency).
+
+        ``case_db_id`` is the after-sales row primary key, not the business
+        ``CASE-XXXXXXXX`` string.
+        """
+        stmt = (
+            select(Ticket)
+            .where(Ticket.case_id == case_db_id)
+            .order_by(Ticket.id)
+        )
+        return list(self._session.scalars(stmt))
+
 
 class KnowledgeDocumentRepository(BaseRepository):
     """Repository for knowledge documents (single database boundary)."""

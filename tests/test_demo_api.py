@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.base import Base
-from app.db.models import Order, Refund
+from app.db.models import Order, Refund, Ticket
 from app.db.session import create_db_engine, create_session_factory, get_db
 from app.demo.demo_seed import prepare_demo_database
 from app.demo.store import get_store, reset_store
@@ -53,7 +53,14 @@ def demo_api(tmp_path):
     engine.dispose()
 
 
-def _chat(client, message, session_id="demo-s", user_confirmed=None, user_id=1):
+def _chat(
+    client,
+    message,
+    session_id="demo-s",
+    user_confirmed=None,
+    user_id=1,
+    reference_time=None,
+):
     payload = {
         "message": message,
         "user_id": user_id,
@@ -61,6 +68,9 @@ def _chat(client, message, session_id="demo-s", user_confirmed=None, user_id=1):
     }
     if user_confirmed is not None:
         payload["user_confirmed"] = user_confirmed
+    if reference_time is not None:
+        # Demo/evaluation only: pin the after-sales policy window.
+        payload["reference_time"] = reference_time
     resp = client.post(f"{API}/demo/chat", json=payload)
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -295,3 +305,91 @@ def test_case_service_failure_keeps_chat_working(demo_api, monkeypatch):
     assert run["case"] is None
     assert run["text"].strip()
     assert AfterSalesService(session).list_cases() == []
+
+
+def test_after_sales_treatment_and_ticket_api(demo_api):
+    """Phase 9D: eligible case -> treatment plan + linked ticket, no execution."""
+    client, session = demo_api
+    refunds_before = len(session.scalars(select(Refund)).all())
+    tickets_before = len(session.scalars(select(Ticket)).all())
+    # The seed's delivery timestamps are fixed, so the policy window is pinned.
+    reference = "2026-08-25T00:00:00+00:00"
+
+    _chat(
+        client,
+        "我的耳机坏了，帮我处理一下。",
+        session_id="demo-9d",
+        reference_time=reference,
+    )
+    second = _chat(
+        client,
+        "订单是 ORD-1003，我想换货。",
+        session_id="demo-9d",
+        reference_time=reference,
+    )
+
+    case = second["case"]
+    assert case["status"] == "PROCESSING"
+    assert second["eligibility"]["eligible"] is True
+    treatment = second["treatment"]
+    assert treatment["action"] == "EXCHANGE"
+    assert treatment["required_next_step"] == "等待后续换货执行"
+    ticket = second["ticket"]
+    assert ticket["id"] is not None
+    assert ticket["created"] is True
+    assert ticket["count"] == 1
+
+    labels = [step["label"] for step in second["steps"]]
+    assert labels[:7] == [
+        "Understand",
+        "Case Upsert",
+        "Order Investigation",
+        "Policy Retrieval",
+        "Eligibility Check",
+        "Treatment Plan",
+        "Ticket Creation",
+    ]
+    # The five Phase 9D facts the /chat trace must expose are all readable.
+    details = {step["label"]: step.get("detail") or "" for step in second["steps"]}
+    assert case["case_id"] in details["Case Upsert"]
+    assert "换货" in details["Treatment Plan"]
+    assert f"TICKET-{ticket['id']}" in details["Ticket Creation"]
+    assert f"TICKET-{ticket['id']}" in second["text"]
+    assert "等待后续换货执行" in second["text"]
+
+    # Nothing was executed, and exactly one linked ticket was added.
+    assert len(session.scalars(select(Refund)).all()) == refunds_before
+    assert len(session.scalars(select(Ticket)).all()) == tickets_before + 1
+    row = session.get(Ticket, ticket["id"])
+    assert row.case_id is not None
+    assert row.category == "AFTER_SALES"
+
+    # Retrying the same case reuses the ticket instead of creating a second one.
+    AfterSalesService(session).update_case(case["case_id"], status="ELIGIBILITY_CHECK")
+    third = _chat(
+        client,
+        "订单是 ORD-1003，我想换货。",
+        session_id="demo-9d",
+        reference_time=reference,
+    )
+    assert third["ticket"]["id"] == ticket["id"]
+    assert third["ticket"]["count"] == 1
+    assert third["ticket"]["created"] is False
+    assert len(session.scalars(select(Ticket)).all()) == tickets_before + 1
+
+
+def test_after_sales_case_has_no_treatment_before_eligibility(demo_api):
+    """Information collection must never produce a treatment plan or ticket."""
+    client, session = demo_api
+    tickets_before = len(session.scalars(select(Ticket)).all())
+
+    run = _chat(client, "我的耳机坏了，帮我处理一下。")
+
+    assert run["case"]["status"] == "INFORMATION_COLLECTION"
+    assert run["eligibility"] is None
+    assert run["treatment"] is None
+    assert run["ticket"] is None
+    labels = [step["label"] for step in run["steps"]]
+    assert "Treatment Plan" not in labels
+    assert "Ticket Creation" not in labels
+    assert len(session.scalars(select(Ticket)).all()) == tickets_before

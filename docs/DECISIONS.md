@@ -571,3 +571,21 @@ Eligibility is determined by deterministic business logic using authoritative bu
 - 不复制政策文本：代码里没有第二份「十五天」的硬编码规则，政策文档改了，窗口随之改变；
 - 不改动 RAG：`RetrievalPipeline`（Hybrid Dense + BM25 -> RRF -> Rerank -> Context Assembly）原样复用，适配器只消费它的输出；
 - `REPAIR` 等知识库中没有对应政策文档的诉求没有 category 映射，因此只能得到「政策未覆盖」，不会被误判为「不符合条件」。
+
+## Decision 047 — Treatment planning is constrained by Case requested_action and deterministic eligibility results
+
+**Decision:**
+售后「处理方案」(TreatmentPlan)由确定性规则生成:`用户请求(requested_action) + Case(case_type / problem) + EligibilityResult + 业务规则 → TreatmentPlan`。`action` 只能来自 `REFUND` / `EXCHANGE` / `REPAIR`,并且**必须等于用户自己提出的 `requested_action`**;LLM 不能独立选择一个可执行的业务动作,也不能把退款请求变成换货。`eligible != True`、`requested_action = UNKNOWN` 时不选动作、`requires_execution=False`、不创建执行型工单。
+
+**Reason:**
+如果让 LLM 自由决定「退款 / 换货 / 维修」,业务动作就会受模型随机性影响:同一句「我的耳机坏了」在不同采样下可能生成不同的售后动作,而这直接决定真实业务后果。因此动作的来源必须是**用户明确表达的诉求**这一事实,而不是模型的判断。Eligibility 已经回答了「能不能处理」(确定性业务规则 + 权威业务事实 + 检索到的政策证据),Treatment Plan 只回答「按用户诉求怎么准备」,两者都不接受 LLM 的自由发挥——LLM 只负责语言理解(把自然语言变成结构化的 case 事实)。
+
+边界(Phase 9D 强制):
+
+- TreatmentPlan 由纯领域模块 `backend/app/after_sales/treatment.py` 生成:无 SQLAlchemy、无 Service、无 LLM、无 retrieval(测试含源码级 import 守卫),可离线确定性复现;
+- 动作校验是**白名单**:`EXECUTABLE_ACTIONS = (REFUND, EXCHANGE, REPAIR)`;UNKNOWN 或非法值一律视为「不能自动决定」,要求补充信息或转人工,而不是自选;
+- `eligible=False` -> `REJECTED`,不建执行型工单;`eligible=None` -> 保持 `ELIGIBILITY_CHECK` / `INFORMATION_COLLECTION`,不建执行型工单;
+- 工单只经 `TicketService → Repository → DB` 创建(不直接写库、不绕过 `TicketService`),`AgentWorkflow` 只依赖注入的 `AfterSalesTreatmentPlannerLike` Protocol,Agent 层仍不 import SQLAlchemy / Service;
+- 工单描述使用结构化模板,其中的订单状态 / 资格判断 / 政策依据必须取自已有调查结果与检索到的 citation,LLM 不得编造;
+- **本阶段不执行任何业务动作**:没有 create_refund / cancel_order / 换货 / 维修,真正的执行必须走既有 Risk Gate + Human-in-the-loop + Execute → Verify(后续 Phase);
+- 同一 Case 重复处理只复用已有工单(幂等),不重复创建;创建失败必须如实返回失败,不伪造 ticket_id。

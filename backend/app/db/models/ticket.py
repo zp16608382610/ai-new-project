@@ -17,6 +17,12 @@ class Ticket(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True, index=True)
+    # Phase 9D: the after-sales case this ticket was raised for. Nullable on
+    # purpose: ordinary support tickets have no case. One case may have many
+    # tickets (1:N), so this is a plain FK + index and never unique.
+    case_id: Mapped[int | None] = mapped_column(
+        ForeignKey("after_sales_cases.id"), nullable=True, index=True
+    )
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     priority: Mapped[TicketPriority] = mapped_column(
         SAEnum(
@@ -52,3 +58,4 @@ class Ticket(Base):
 
     user: Mapped[User] = relationship("User", back_populates="tickets")
     order: Mapped[Order | None] = relationship("Order")
+    case: Mapped[AfterSalesCase | None] = relationship("AfterSalesCase")

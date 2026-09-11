@@ -6,6 +6,7 @@ business rules and no UI-side decision logic.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -35,6 +36,10 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     request_id: str | None = None
     user_confirmed: bool | None = None
+    # Demo/evaluation only: pin the after-sales policy window (ISO timestamp) so
+    # the scripted after-sales scenario is reproducible. None (what the UI
+    # sends) means the real clock, i.e. the honest wall-clock verdict.
+    reference_time: str | None = None
 
 
 class ResolveRequest(BaseModel):
@@ -108,6 +113,11 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
         session_id=payload.session_id,
         request_id=payload.request_id,
         user_confirmed=payload.user_confirmed,
+        investigation_reference_time=(
+            datetime.fromisoformat(payload.reference_time)
+            if payload.reference_time
+            else None
+        ),
     )
 
 

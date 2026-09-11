@@ -26,6 +26,8 @@ REQUIRED_CATEGORIES = {
     "Unsafe / Prompt Injection",
     "After-sales / Eligibility",
     "After-sales / Information Collection",
+    "After-sales / Treatment",
+    "After-sales / Ticket",
 }
 
 # Phase 9C after-sales scenarios (information collection / investigation /
@@ -37,6 +39,17 @@ AFTER_SALES_CASE_IDS = [
     "after-sales-cross-user",
     "after-sales-missing-order",
     "after-sales-missing-action",
+]
+
+# Phase 9D: treatment planning + ticket creation are graded as their own
+# metrics, and no case may trigger a real business write.
+AFTER_SALES_TREATMENT_CASE_IDS = [
+    "after-sales-treatment-exchange",
+    "after-sales-treatment-expired",
+    "after-sales-treatment-order-not-found",
+    "after-sales-treatment-cross-user",
+    "after-sales-treatment-unknown-action",
+    "after-sales-treatment-idempotent",
 ]
 
 
@@ -193,3 +206,55 @@ def test_after_sales_outcome_never_confuses_information_with_ineligibility():
         assert row["actual"]["eligible"] is None
         assert row["actual"]["case_status"] == "INFORMATION_COLLECTION"
         assert row["status"] == "PASS"
+
+
+def test_after_sales_treatment_evaluation_cases_are_deterministic():
+    """Phase 9D: the treatment/ticket metrics really are graded."""
+    report = run_evaluation(case_ids=AFTER_SALES_TREATMENT_CASE_IDS, use_llm=False)
+
+    assert report["total_cases"] == 6
+    assert report["failed"] == 0
+    for name in (
+        "treatment_plan_accuracy",
+        "ticket_creation_success",
+        "ticket_id_presence",
+        "execution_not_triggered",
+    ):
+        metric = report["metrics"][name]
+        assert metric["applicable"] == 6, name
+        assert metric["rate"] == 100.0, name
+    duplicate = report["metrics"]["duplicate_ticket_rate"]
+    assert duplicate["applicable"] == 2
+    assert duplicate["rate"] == 100.0
+
+    rows = {row["case_id"]: row["actual"] for row in report["cases"]}
+    eligible = rows["after-sales-treatment-exchange"]
+    assert eligible["treatment_action"] == "EXCHANGE"
+    assert eligible["ticket_id"] is not None
+    assert eligible["ticket_count"] == 1
+    assert eligible["case_status"] == "PROCESSING"
+    # Rejected / inconclusive / unknown-action cases get no action and no ticket.
+    for case_id in (
+        "after-sales-treatment-expired",
+        "after-sales-treatment-order-not-found",
+        "after-sales-treatment-cross-user",
+        "after-sales-treatment-unknown-action",
+    ):
+        assert rows[case_id]["treatment_action"] is None, case_id
+        assert rows[case_id]["ticket_created"] is False, case_id
+        assert rows[case_id]["ticket_id"] is None, case_id
+    # The retried run reuses the ticket instead of creating a second one.
+    retried = rows["after-sales-treatment-idempotent"]
+    assert retried["ticket_created"] is False
+    assert retried["ticket_id"] is not None
+    assert retried["ticket_count"] == 1
+
+
+def test_evaluation_never_triggers_a_business_write_for_after_sales():
+    """Phase 9D prepares work only: no refund / cancel / exchange / repair."""
+    report = run_evaluation(case_ids=AFTER_SALES_TREATMENT_CASE_IDS, use_llm=False)
+
+    for row in report["cases"]:
+        assert row["actual"]["execution_triggered"] is False, row["case_id"]
+        assert row["actual"]["execution_success"] is None, row["case_id"]
+        assert row["status"] == "PASS", row["case_id"]

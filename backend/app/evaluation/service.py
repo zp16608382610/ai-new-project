@@ -116,6 +116,12 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
                 resolved_by="evaluation-runner",
                 use_llm=use_llm,
             )
+        if case.retry_same_case:
+            # Phase 9D: replay the SAME message against the SAME case so ticket
+            # idempotency is really exercised (never a second ticket).
+            final_payload = _retry_same_case(
+                session, store, case, final_payload or {}, use_llm=use_llm
+            )
     except Exception as exc:  # a failing case is reported, never hidden
         error = f"{type(exc).__name__}: {exc}"
 
@@ -142,6 +148,8 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
                     if case.expected_failed_rules is not None
                     else None
                 ),
+                "treatment_action": case.expected_treatment_action,
+                "ticket_created": case.expected_ticket_created,
             },
             "actual": {
                 "intent": None,
@@ -158,6 +166,8 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
                 "case_status": None,
                 "eligible": None,
                 "failed_rules": None,
+                "treatment_action": None,
+                "ticket_created": None,
             },
             "status": "FAIL",
             "failure_reasons": [f"RUN_ERROR: {error}"],
@@ -165,6 +175,37 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
         }
 
     return evaluate_case(case, initial_payload or {}, final_payload or {})
+
+
+def _retry_same_case(session, store, case: EvaluationCase, payload: dict, *, use_llm: bool):
+    """Replay one case's message against the SAME after-sales case.
+
+    A duplicate-ticket risk only appears when the same case is handled twice
+    (e.g. a retried request): the case state machine re-investigates a case
+    only while it is in ELIGIBILITY_CHECK, so the retry restores that state and
+    replays the identical message. The run store is reused on purpose: the
+    session -> case link lives there.
+    """
+    from app.demo.service import run_chat
+
+    case_block = (payload or {}).get("case") or {}
+    case_id = case_block.get("case_id")
+    if not case_id:
+        return payload
+    from app.after_sales.eligibility import STATUS_ELIGIBILITY_CHECK
+    from app.services.after_sales_service import AfterSalesService
+
+    AfterSalesService(session).update_case(case_id, status=STATUS_ELIGIBILITY_CHECK)
+    return run_chat(
+        session,
+        store,
+        message=case.user_message,
+        user_id=case.user_id,
+        session_id=f"eval-{case.case_id}",
+        user_confirmed=case.user_confirmed,
+        use_llm=use_llm,
+        investigation_reference_time=_reference_time(case),
+    )
 
 
 def _reference_time(case: EvaluationCase) -> datetime | None:

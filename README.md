@@ -1,6 +1,6 @@
 # Enterprise AI Customer Service Agent
 
-企业级 AI 电商售后客服 Agent。规划能力(RAG 已落地 Phase 3A 知识入库、Phase 3B 本地混合检索与 Phase 3C 本地重排 + 上下文组装;Phase 4A Agent Workflow 骨架与 Phase 4B Tool Execution(Agent → Tool → Service → Repository → Database)已落地;Phase 5 已实现**Risk Control + Human-in-the-loop**;Phase 6 已落地 **MCP MVP**(Agent → Risk → MCP Client → MCP Server → Tool → Service,内部工具与 MCP 工具并存);Phase 7A 已把上述 Agent 能力打包为**可现场演示的 Frontend Demo**(`/chat` + `/console` + `/evaluation`,前端只调用真实后端 API、纯展示层);Phase 7B 已接入**可选真实 DeepSeek**(默认 `LLM_ENABLED=false`:仅做意图理解与最终回复生成,业务事实来自 RAG / Tools,高风险动作由 Risk / HITL 控制,无 Key / 失败自动回退确定性流程);**评测 / Observability / Final Demo 打包(Phase 7C)尚未实现**;见 docs/DEVELOPMENT_PLAN.md):
+企业级 AI 电商售后客服 Agent。规划能力(RAG 已落地 Phase 3A 知识入库、Phase 3B 本地混合检索与 Phase 3C 本地重排 + 上下文组装;Phase 4A Agent Workflow 骨架与 Phase 4B Tool Execution(Agent → Tool → Service → Repository → Database)已落地;Phase 5 已实现**Risk Control + Human-in-the-loop**;Phase 6 已落地 **MCP MVP**(Agent → Risk → MCP Client → MCP Server → Tool → Service,内部工具与 MCP 工具并存);Phase 7A 已把上述 Agent 能力打包为**可现场演示的 Frontend Demo**(`/chat` + `/console` + `/evaluation`,前端只调用真实后端 API、纯展示层);Phase 7B 已接入**可选真实 DeepSeek**(默认 `LLM_ENABLED=false`:仅做意图理解与最终回复生成,业务事实来自 RAG / Tools,高风险动作由 Risk / HITL 控制,无 Key / 失败自动回退确定性流程);Phase 7C 已落地**固定数据集评测 + 单机 Observability Trace + Final Demo 打包**(规模化评测 / 生产级可观测基座仍属 Phase 8);Phase 9A–9D 已落地**售后案件领域模型 → Case 接入 → 调查与资格判定 → 处理方案与售后工单**(仍不执行退款 / 换货 / 维修);见 docs/DEVELOPMENT_PLAN.md):
 
 - Agent
 - RAG
@@ -13,7 +13,7 @@
 
 ## Current Phase
 
-**Phase 9C – After-Sales Investigation + Eligibility(completed)**
+**Phase 9D – After-Sales Treatment Plan + Ticket Creation(completed)**
 
 Phase 1(Foundation)、Phase 2A(数据层)、Phase 2B(Mock Business API)、Phase 2C(Business Scenario Tests)、Phase 3A(知识库接入)、Phase 3B(混合检索)、Phase 3C(Reranking + Context Assembly)、Phase 4A(Agent Workflow 骨架)、Phase 4B(Tool Execution)、Phase 5(Risk Control + Human-in-the-loop)与 Phase 6(MCP MVP)已完成。当前状态:FastAPI 骨架、7 张 Mock 业务表 + 订单 / 物流 / 退款 / 取消 / 工单 HTTP API、Repository / Service 分层与场景化测试;知识库 `knowledge_documents` / `knowledge_chunks`(Alembic 迁移 `018c7c0772c7`)+ 入库管线;检索层 `app/retrieval/`:**Query Processing → Dense + BM25 → RRF Fusion → Candidate Set → Reranking → Context Assembly → Final Context**(内部 `RetrievalPipeline`,无公开 RAG 端点);Agent 层 `app/agent/`(Intent / Route / Workflow)与工具层 `app/tools/`(Tool Registry → Tool Executor → Service → Repository → Database,六个售后工具 + Pydantic 校验 + trusted user_id 授权 + 统一 ToolResult)。Phase 5 在 Agent 工具执行路径接入风险门:Risk Engine 分级(LOW / MEDIUM / HIGH / CRITICAL)+ Risk Gate(取消需用户确认、退款默认人工审批)+ approval_requests 审批表 + /api/v1/approvals 审批 API + Resume 原 ToolRequest + Execute→Verify(详见 docs/RISK_CONTROL.md)。Phase 6 在工具执行路径叠加 MCP:本地 stdio MCP Server(`ecommerce-customer-service`,官方 SDK `mcp==2.1.1`)只暴露 `get_order` / `get_logistics` / `create_ticket`;`MCPToolAdapter` 让 ORDER_STATUS / LOGISTICS_TRACKING / CREATE_TICKET 走 MCP,REFUND / CANCEL 仍走内部 Tool Executor + Risk Gate——Risk Gate 先于 MCP,退款不通过 MCP 绕过审批(详见 docs/MCP.md 与 docs/ARCHITECTURE.md §20)。检索默认只取 ACTIVE 版本(退款 v1/v2 已测试);支持 category / language / status typed 过滤;27 条确定性检索数据集 + rerank/context 单元与端到端用例。RAG 检索仍为确定性流水线(无 LLM rewrite);Phase 7B 起,LLM 最终回复生成只消费 RAG / Tool 权威证据(独立语义 Grounding 验证器尚未实现);`DeterministicReranker` 是「可替换架构 + 确定性测试实现」而非语义模型;Context 受 token budget(默认 2000,支持 reserve)控制并保留 citation/溯源;真实 Embedding 模型与 pgvector 未接入/未实测。
 
@@ -28,11 +28,13 @@ Phase 7C 在不动 Agent / Risk / Approval / Tools / MCP / Retrieval 核心的�
 
 Phase 9A 落地独立售后案件领域模型(`after_sales_cases` + `AfterSalesCaseStatus`,不接入 Agent);Phase 9B 让 Agent 识别售后处理请求并创建 / 更新 Case、完成基础信息收集(`Intent.AFTER_SALES_REQUEST` / `Route.AFTER_SALES_CASE` / `WorkflowStage.CASE_MANAGEMENT`,见 docs/ARCHITECTURE.md §25);Phase 9C 让 `ELIGIBILITY_CHECK` 的案件自动完成售后调查:Order Investigation(业务事实:订单存在性 / 归属 / 状态 / 商品可退性 / 在途退款 / 签收参考时间)+ Policy Investigation(复用既有 Hybrid RAG 取得政策证据与 citation)→ 由纯领域 `EligibilityEngine` 给出确定性资格结论(三态 `eligible`),案件随之进入 `PROCESSING` / `REJECTED` / 返回 `INFORMATION_COLLECTION`;Agent 层仍不直接访问数据库,调查通过注入的 Protocol 完成。LLM 只做理解,不产生业务事实,也不能决定资格(见 docs/ARCHITECTURE.md §26 与 docs/DECISIONS.md Decision 045 / 046)。本阶段**不执行**退款 / 换货 / 维修,不改动 RefundService / CancelOrder / Risk Gate / HITL / Execute / Verify;新增 35 例测试(含 6 个售后评测 case 与新 `CASE` 指标),全套 480 例全绿。
 
+Phase 9D 让 `eligible=true` 的案件继续往前走一步:由纯领域 `TreatmentPlanner`(`backend/app/after_sales/treatment.py`,无 SQLAlchemy / 无 LLM)生成结构化 **TreatmentPlan**(action 只能是 REFUND / EXCHANGE / REPAIR,且必须等于用户自己提出的 `requested_action`;`eligible=False` / `None` 或诉求为 UNKNOWN 时不选动作、不建执行型工单),再由 `AfterSalesTreatmentService` 复用既有 `TicketService` 创建 / 复用**售后工单**(`tickets.case_id → after_sales_cases.id`,Alembic 迁移 `8b1f3c5d7e90`),把处理方案写入 `after_sales_cases.collected_information["treatment_plan"]`,案件保持 `PROCESSING`(表示「任务已建立、等待执行」,不是 COMPLETED)。**幂等**:同一案件重复处理只复用工单,不重复创建;**不执行任何业务动作**(无 create_refund / cancel_order / 换货 / 维修),真正执行留给后续 Phase。Demo timeline 新增 `Treatment Plan` / `Ticket Creation` 步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status;Evaluation 新增 6 个 case 与 5 项指标(`treatment_plan_accuracy` / `ticket_creation_success` / `ticket_id_presence` / `duplicate_ticket_rate` / `execution_not_triggered`)。新增 27 例测试,全套 **509 例全绿**;零新增第三方依赖。见 docs/ARCHITECTURE.md §27 与 docs/DECISIONS.md Decision 047。
+
 ## Next Phase
 
-**Next: Phase 9D – After-Sales Execution(退款 / 换货 / 维修),not started**
+**Next: Phase 9E – After-Sales Execution(退款 / 换货 / 维修),not started**
 
-Phase 9D 及以后仍需补齐:售后资格的**执行**(退款 / 换货 / 维修,必须复用既有 Risk Gate + HITL + Execute → Verify)、售后金额计算、人工复核流程。Phase 8 保留规模化评测集(Retrieval / Generation / Agent / Tool / Product 五层)、生产级指标与日志聚合;Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)与 Phase 9 Final Demo(现场彩排 / 验收)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
+Phase 9E 及以后仍需补齐:售后资格的**执行**(退款 / 换货 / 维修,必须复用既有 Risk Gate + HITL + Execute → Verify)、售后金额计算、人工复核流程。Phase 8 保留规模化评测集(Retrieval / Generation / Agent / Tool / Product 五层)、生产级指标与日志聚合;Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)与 Phase 9 Final Demo(现场彩排 / 验收)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
 
 ## 架构一览
 

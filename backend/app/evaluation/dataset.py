@@ -20,6 +20,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Phase 9D: sentinel for "the treatment plan must carry no business action".
+NO_ACTION = "NONE"
+
 
 @dataclass(frozen=True)
 class EvaluationCase:
@@ -48,6 +51,16 @@ class EvaluationCase:
     expected_case_status: str | None = None
     expected_eligible: bool | None = None
     expected_failed_rules: tuple[str, ...] | None = None
+    # --- Phase 9D after-sales treatment / ticket expectations (None => N/A) ---
+    # expected_treatment_action: an action name, or NO_ACTION for "no action".
+    expected_treatment_action: str | None = None
+    expected_ticket_created: bool | None = None
+    expected_ticket_id_present: bool | None = None
+    expected_single_ticket: bool | None = None
+    expected_execution_not_triggered: bool | None = None
+    # Replay the same message against the SAME case (workflow retry) so ticket
+    # idempotency is really exercised.
+    retry_same_case: bool = False
     note: str = ""
 
 
@@ -316,6 +329,126 @@ EVALUATION_DATASET: tuple[EvaluationCase, ...] = (
         expected_requires_approval=False,
         expected_outcome="CLARIFY",
         note="Missing requested_action -> still information collection, never a conclusion.",
+    ),
+    # ---- Phase 9D: treatment plan + after-sales ticket --------------------
+    EvaluationCase(
+        case_id="after-sales-treatment-exchange",
+        category="After-sales / Treatment",
+        scenario="Eligible quality case -> deterministic EXCHANGE plan + ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PROCESSING",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_PROCESSING",
+        expected_treatment_action="EXCHANGE",
+        expected_ticket_created=True,
+        expected_ticket_id_present=True,
+        expected_single_ticket=True,
+        expected_execution_not_triggered=True,
+        note="The plan may only confirm the requested action; nothing is executed.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-treatment-expired",
+        category="After-sales / Treatment",
+        scenario="Not eligible (past the policy window) -> rejected, no ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-10-01T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="REJECTED",
+        expected_eligible=False,
+        expected_failed_rules=("after_sales_window",),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_REJECTED",
+        expected_treatment_action=NO_ACTION,
+        expected_ticket_created=False,
+        expected_ticket_id_present=False,
+        expected_execution_not_triggered=True,
+        note="REJECTED must never produce an execution ticket.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-treatment-order-not-found",
+        category="After-sales / Treatment",
+        scenario="Unknown order -> no conclusion, no ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1004\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1004",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_failed_rules=("order_available",),
+        expected_requires_approval=False,
+        expected_outcome="INFORMATION_COLLECTION",
+        expected_treatment_action=NO_ACTION,
+        expected_ticket_created=False,
+        expected_ticket_id_present=False,
+        expected_execution_not_triggered=True,
+        note="'Cannot investigate' is not 'not eligible': eligible stays None.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-treatment-cross-user",
+        category="After-sales / Treatment",
+        scenario="Order owned by another user -> no conclusion, no ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-2001\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-2001",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_failed_rules=("order_available",),
+        expected_requires_approval=False,
+        expected_outcome="INFORMATION_COLLECTION",
+        expected_treatment_action=NO_ACTION,
+        expected_ticket_created=False,
+        expected_ticket_id_present=False,
+        expected_execution_not_triggered=True,
+        note="Cross-user order: the deterministic engine refuses to conclude.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-treatment-unknown-action",
+        category="After-sales / Treatment",
+        scenario="No requested_action -> no arbitrary action, no ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_requires_approval=False,
+        expected_outcome="CLARIFY",
+        expected_treatment_action=NO_ACTION,
+        expected_ticket_created=False,
+        expected_ticket_id_present=False,
+        expected_execution_not_triggered=True,
+        note="UNKNOWN action: the planner must never pick refund/exchange/repair.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-treatment-idempotent",
+        category="After-sales / Ticket",
+        scenario="The same case is handled twice -> exactly one ticket.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PROCESSING",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_PROCESSING",
+        expected_treatment_action="EXCHANGE",
+        expected_ticket_created=False,
+        expected_ticket_id_present=True,
+        expected_single_ticket=True,
+        expected_execution_not_triggered=True,
+        retry_same_case=True,
+        note="The retried run reuses the existing ticket (created=False, count=1).",
     ),
 )
 

@@ -574,3 +574,53 @@ service   AfterSalesInvestigationService.investigate(case)
 ### 26.5 明确未实现
 
 退款 / 换货 / 维修的**执行**、售后金额计算、人工审批流的扩大、真实 Embedding / pgvector 的语义政策检索、规模化评测与生产级可观测性仍属后续 Phase（9D 及以后 / Phase 8）。
+
+## 27. After-Sales Treatment Plan + Ticket Creation（Phase 9D 落地）
+
+### 27.1 职责边界（本阶段新增的两个角色）
+
+| 角色 | 负责 | 不负责 |
+| --- | --- | --- |
+| Eligibility Engine（9C，既有） | 判断「能不能处理」：三态 `eligible` | 决定具体动作、创建工单 |
+| **Treatment Planner**（9D，纯领域 `app/after_sales/treatment.py`） | 按用户诉求 + eligibility + 业务规则生成受约束的 `TreatmentPlan` | 执行动作、访问数据库、调用 LLM |
+| **Ticket Service / AfterSalesTreatmentService**（9D，服务层） | 经既有 `TicketService` 创建 / 复用售后工单并写回案件 | 执行退款 / 换货 / 维修、修改 Risk / HITL |
+| Risk Gate / HITL / Execute / Verify（5 / 7C，既有） | 真正的执行授权与执行后校验 | 本阶段完全不参与 |
+
+### 27.2 调用链
+
+```
+HTTP / Chat
+  -> AgentWorkflow
+       Understand -> CASE_MANAGEMENT -> CASE_INVESTIGATION -> CASE_TREATMENT -> FINALIZE
+                                                              (only eligible is True
+                                                               and case status PROCESSING)
+
+  CASE_TREATMENT -> AfterSalesTreatmentService.plan_and_register(case, eligibility)
+        |- TreatmentPlanner.plan(case_facts, EligibilitySummary) -> TreatmentPlan
+        |- TicketRepository.list_by_case(case.id)   # idempotency lookup
+        |- TicketService.create_ticket(..., case_id=case.id) -> Repository -> DB
+        '- AfterSalesService.update_case(collected_information["treatment_plan"])
+```
+
+数据关系:`after_sales_cases 1 —— N tickets`(`tickets.case_id` 可空 FK + 索引,迁移 `8b1f3c5d7e90`)。普通支持工单 `case_id` 为 NULL,行为完全不变。
+
+### 27.3 TreatmentPlan 与状态语义
+
+- 字段:`action` / `reason` / `case_id` / `case_status` / `case_type` / `order_id` / `order_ref` / `required_next_step` / `requires_execution` / `requires_human_review` / `executable` / `ticket_category` / `policy_citations`。
+- `action ∈ {REFUND, EXCHANGE, REPAIR}` 且必须等于 `case.requested_action`;否则 `action=None`、`executable=False`、`requires_human_review=True`(Decision 047)。
+- 案件状态语义不变:`PROCESSING` = 「售后处理任务已建立,可以进入后续执行」;**不是** `COMPLETED`(真正的业务变更尚未发生)。
+- 处理方案存放于 `after_sales_cases.collected_information["treatment_plan"]`(含 ticket 块与 `ticket_registered` / `ticket_error`),复用既有 JSON 列,不新建第二张表。
+
+### 27.4 幂等与失败语义
+
+- 创建前先按 `case_id` 查询既有工单:存在即复用(`created=false`,`count=N`),只查不建,保证「同一 Case 只有 1 个 Ticket」。
+- 工单创建失败:捕获异常并记录到 `treatment_plan.ticket_error`,`ticket_registered=false`,返回值带明确 `error`,案件状态保持 `PROCESSING`;**绝不**向用户声称工单已创建,也绝不伪造 ticket_id。
+- 工单描述使用结构化模板(售后类型 / 申请动作 / 问题描述 / 订单 + 订单状态 / 资格判断 / 政策依据 / 下一步),业务事实全部来自已有调查结果与检索 citation。
+
+### 27.5 Demo 与 Observability
+
+`/api/v1/demo/chat` payload 新增 `treatment` / `ticket`;timeline 复用既有机制,在 `Eligibility Check` 之后新增 `Treatment Plan` / `Ticket Creation` 两个步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status,前端无需改动。售后时效按真实时钟判定(seed 签收时间固定,线上 demo 可能得到 `REJECTED`),脚本化 demo / 评测可通过可选 `reference_time` 固定窗口。
+
+### 27.6 明确未实现
+
+退款 / 换货 / 维修的**执行**、售后金额计算、人工复核与审批扩大、售后执行后的 Verify、真实 Embedding 语义政策检索与规模化评测仍属后续 Phase(9E / Phase 8)。本阶段没有触发任何真实业务变更。

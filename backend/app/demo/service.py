@@ -35,6 +35,7 @@ from app.risk import RiskEngine
 from app.services.approval_service import ApprovalService
 from app.services.after_sales_case_manager import AfterSalesCaseManager
 from app.services.after_sales_investigation import AfterSalesInvestigationService
+from app.services.after_sales_treatment import AfterSalesTreatmentService
 from app.services.verification import BusinessVerifier
 from app.tools.executor import ToolExecutor
 from app.tools.handlers import build_default_registry
@@ -85,6 +86,9 @@ class DemoComponents:
             retrieval=self.retrieval,
             reference_time=investigation_reference_time,
         )
+        # Phase 9D: deterministic treatment planning + idempotent after-sales
+        # ticket creation (same DB session; nothing is executed).
+        self.treatment = AfterSalesTreatmentService(session)
         self.workflow = AgentWorkflow(
             retrieval=self.retrieval,
             tool_executor=self.provider,
@@ -95,6 +99,7 @@ class DemoComponents:
             llm_responder=llm_responder,
             case_manager=self.case_manager,
             case_investigator=self.investigator,
+            treatment_planner=self.treatment,
         )
         self.llm_provider_name = "DeepSeek" if llm_intent is not None else None
 

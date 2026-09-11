@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.evaluation.dataset import EvaluationCase
+from app.evaluation.dataset import NO_ACTION, EvaluationCase
 
 JsonDict = dict[str, Any]
 
@@ -30,6 +30,12 @@ METRICS = (
     "EXECUTION",
     "VERIFICATION",
     "CASE",
+    # Phase 9D: after-sales treatment plan + ticket creation.
+    "treatment_plan_accuracy",
+    "ticket_creation_success",
+    "ticket_id_presence",
+    "duplicate_ticket_rate",
+    "execution_not_triggered",
 )
 
 # The write/read operation each business route is expected to reach.
@@ -54,6 +60,19 @@ _REJECT_MARKERS = (
     "contains non-returnable items",
     "order is not refundable",
 )
+
+# Phase 9D: tools that MUTATE business state. None of them may run in 9D; the
+# record only exists to prove it (execution belongs to Phase 9E behind the
+# Risk Gate / Human-in-the-loop layers).
+_WRITE_TOOLS = ("create_refund", "cancel_order", "execute_exchange", "execute_repair")
+
+
+def execution_triggered(payload: JsonDict) -> bool:
+    """True only when a real business write actually executed in this run."""
+    for step in payload.get("steps") or []:
+        if step.get("label") in _WRITE_TOOLS and step.get("state") == "success":
+            return True
+    return False
 
 
 def normalize_order_ref(value: Any) -> str | None:
@@ -171,6 +190,10 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
     verification = actual_verification(payload)
     case_view = payload.get("case")
     eligibility = payload.get("eligibility")
+    treatment = payload.get("treatment")
+    ticket = payload.get("ticket")
+    treatment_view = treatment if isinstance(treatment, dict) else {}
+    ticket_view = ticket if isinstance(ticket, dict) else {}
     return {
         "intent": payload.get("intent"),
         "route": payload.get("route"),
@@ -198,6 +221,16 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
             if isinstance(eligibility, dict)
             else None
         ),
+        # Phase 9D: deterministic treatment plan + after-sales ticket.
+        "treatment_action": treatment_view.get("action"),
+        "ticket_created": (
+            bool(ticket_view.get("created"))
+            if ticket_view.get("id") is not None
+            else False
+        ),
+        "ticket_id": ticket_view.get("id"),
+        "ticket_count": ticket_view.get("count"),
+        "execution_triggered": execution_triggered(payload),
     }
 
 
@@ -303,6 +336,70 @@ def evaluate_case(
                 f"failed_rules={done['failed_rules']}"
             ),
         })
+    # --- Phase 9D: treatment plan + ticket ----------------------------------
+    if case.expected_treatment_action is None:
+        checks.append({
+            "metric": "treatment_plan_accuracy", "expected": None,
+            "passed": None, "actual": done["treatment_action"],
+        })
+    else:
+        checks.append({
+            "metric": "treatment_plan_accuracy",
+            "expected": case.expected_treatment_action,
+            "passed": (done["treatment_action"] or NO_ACTION)
+            == case.expected_treatment_action,
+            "actual": done["treatment_action"],
+        })
+    if case.expected_ticket_created is None:
+        checks.append({
+            "metric": "ticket_creation_success", "expected": None,
+            "passed": None, "actual": done["ticket_created"],
+        })
+    else:
+        checks.append({
+            "metric": "ticket_creation_success",
+            "expected": case.expected_ticket_created,
+            "passed": bool(done["ticket_created"]) == case.expected_ticket_created,
+            "actual": done["ticket_created"],
+        })
+    if case.expected_ticket_id_present is None:
+        checks.append({
+            "metric": "ticket_id_presence", "expected": None,
+            "passed": None, "actual": done["ticket_id"],
+        })
+    else:
+        checks.append({
+            "metric": "ticket_id_presence",
+            "expected": case.expected_ticket_id_present,
+            "passed": (done["ticket_id"] is not None)
+            == case.expected_ticket_id_present,
+            "actual": done["ticket_id"],
+        })
+    if case.expected_single_ticket is None:
+        checks.append({
+            "metric": "duplicate_ticket_rate", "expected": None,
+            "passed": None, "actual": done["ticket_count"],
+        })
+    else:
+        checks.append({
+            "metric": "duplicate_ticket_rate",
+            "expected": case.expected_single_ticket,
+            "passed": (done["ticket_count"] == 1) == case.expected_single_ticket,
+            "actual": done["ticket_count"],
+        })
+    if case.expected_execution_not_triggered is None:
+        checks.append({
+            "metric": "execution_not_triggered", "expected": None,
+            "passed": None, "actual": done["execution_triggered"],
+        })
+    else:
+        checks.append({
+            "metric": "execution_not_triggered",
+            "expected": case.expected_execution_not_triggered,
+            "passed": (not done["execution_triggered"])
+            == case.expected_execution_not_triggered,
+            "actual": done["execution_triggered"],
+        })
     checks.append({
         "metric": "OUTCOME", "expected": case.expected_outcome,
         "passed": done["outcome"] == case.expected_outcome, "actual": done["outcome"],
@@ -331,6 +428,8 @@ def evaluate_case(
             "execution_success": case.expected_execution_success,
             "verification_success": case.expected_verification_success,
             "outcome": case.expected_outcome,
+            "treatment_action": case.expected_treatment_action,
+            "ticket_created": case.expected_ticket_created,
         },
         "actual": done,
         "status": status,
@@ -363,6 +462,11 @@ def summarize(case_results: list[JsonDict]) -> JsonDict:
                 "EXECUTION": "Execution Success",
                 "VERIFICATION": "Verification Success",
                 "CASE": "After-sales Case / Eligibility",
+                "treatment_plan_accuracy": "Treatment Plan Accuracy",
+                "ticket_creation_success": "Ticket Creation Success",
+                "ticket_id_presence": "Ticket ID Presence",
+                "duplicate_ticket_rate": "Duplicate Ticket Rate",
+                "execution_not_triggered": "Execution Not Triggered",
             }[metric],
             "passed": passed,
             "applicable": len(applicable),

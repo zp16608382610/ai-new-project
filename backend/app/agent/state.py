@@ -75,6 +75,8 @@ class WorkflowStage(str, enum.Enum):
     CASE_MANAGEMENT = "CASE_MANAGEMENT"
     # Phase 9C: order + policy investigation feeding the eligibility engine.
     CASE_INVESTIGATION = "CASE_INVESTIGATION"
+    # Phase 9D: deterministic treatment planning + after-sales ticket creation.
+    CASE_TREATMENT = "CASE_TREATMENT"
     ROUTE = "ROUTE"
     RAG = "RAG"
     BUSINESS_TOOL_REQUEST = "BUSINESS_TOOL_REQUEST"
@@ -193,6 +195,11 @@ class AgentResult:
     # investigation branch really ran.
     after_sales_eligibility: JsonDict | None = None
     after_sales_investigation: JsonDict | None = None
+    # Phase 9D: deterministic treatment plan (serialized TreatmentPlan incl. the
+    # ticket block) and the after-sales ticket created/reused for this case.
+    # None unless the treatment branch really ran.
+    after_sales_treatment: JsonDict | None = None
+    after_sales_ticket: JsonDict | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -218,6 +225,16 @@ class AgentResult:
             "after_sales_investigation": (
                 dict(self.after_sales_investigation)
                 if self.after_sales_investigation is not None
+                else None
+            ),
+            "after_sales_treatment": (
+                dict(self.after_sales_treatment)
+                if self.after_sales_treatment is not None
+                else None
+            ),
+            "after_sales_ticket": (
+                dict(self.after_sales_ticket)
+                if self.after_sales_ticket is not None
                 else None
             ),
         }
@@ -286,6 +303,10 @@ class AgentState:
     # behind it (observability, same shape the demo payload exposes).
     after_sales_eligibility: JsonDict | None = None
     after_sales_investigation: JsonDict | None = None
+    # Phase 9D: serialized TreatmentPlan + the after-sales ticket created or
+    # reused for this case (observability, same shape the demo payload exposes).
+    after_sales_treatment: JsonDict | None = None
+    after_sales_ticket: JsonDict | None = None
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
@@ -332,6 +353,16 @@ class AgentState:
                 if self.after_sales_investigation is not None
                 else None
             ),
+            "after_sales_treatment": (
+                dict(self.after_sales_treatment)
+                if self.after_sales_treatment is not None
+                else None
+            ),
+            "after_sales_ticket": (
+                dict(self.after_sales_ticket)
+                if self.after_sales_ticket is not None
+                else None
+            ),
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
@@ -374,6 +405,12 @@ class AgentState:
         investigation_data = data.get("after_sales_investigation")
         if isinstance(investigation_data, dict):
             state.after_sales_investigation = dict(investigation_data)
+        treatment_data = data.get("after_sales_treatment")
+        if isinstance(treatment_data, dict):
+            state.after_sales_treatment = dict(treatment_data)
+        ticket_data = data.get("after_sales_ticket")
+        if isinstance(ticket_data, dict):
+            state.after_sales_ticket = dict(ticket_data)
         # retrieved_context is a runtime-only structured object; serialization
         # keeps a summary (see to_dict). Deserialization intentionally restores
         # the serializable contract with retrieved_context=None.

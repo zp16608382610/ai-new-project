@@ -346,3 +346,66 @@ class CaseInvestigatorLike(Protocol):
     ) -> AfterSalesInvestigationOutcome:
         """Investigate one complete case and return the updated case."""
         ...
+
+
+@dataclass(frozen=True)
+class AfterSalesTreatmentOutcome:
+    """Result of preparing the standard treatment + ticket for one case (9D).
+
+    Pure, serializable data produced by the service layer:
+
+        case         the updated AfterSalesCaseOutcome (its ``status`` is the
+                     case status: PROCESSING once the treatment is registered)
+        treatment    the serialized TreatmentPlan, INCLUDING the ticket block
+                     once one exists (see ``ticket_registered``)
+        ticket       the created/reused ticket, or None when nothing was
+                     registered (not eligible / no action / creation failed)
+        error        explicit failure code+message when ticket creation failed;
+                     a failure is never reported as "ticket created"
+
+    The agent layer never plans a treatment and never touches the database: the
+    injected planner owns the deterministic rules and the TicketService
+    (docs/DECISIONS.md Decision 047).
+    """
+
+    case: AfterSalesCaseOutcome
+    treatment: dict[str, Any] = field(default_factory=dict)
+    ticket: dict[str, Any] | None = None
+    ticket_created: bool = False
+    error: str | None = None
+
+    @property
+    def status(self) -> str:
+        return self.case.status
+
+    @property
+    def action(self) -> str | None:
+        value = self.treatment.get("action") if isinstance(self.treatment, dict) else None
+        return str(value) if value else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case": self.case.to_dict(),
+            "treatment": dict(self.treatment),
+            "ticket": dict(self.ticket) if isinstance(self.ticket, dict) else None,
+            "ticket_created": self.ticket_created,
+            "error": self.error,
+        }
+
+
+class AfterSalesTreatmentPlannerLike(Protocol):
+    """Treatment interface the workflow depends on (Phase 9D).
+
+    ``AfterSalesTreatmentService`` (service layer) structurally satisfies it:
+    it owns the deterministic TreatmentPlanner, the existing TicketService and
+    the after-sales case service. The agent layer never imports SQLAlchemy, and
+    never decides a business action itself.
+    """
+
+    def plan_and_register(
+        self,
+        case: AfterSalesCaseOutcome,
+        eligibility: dict[str, Any],
+    ) -> AfterSalesTreatmentOutcome:
+        """Plan the standard treatment and create/reuse the after-sales ticket."""
+        ...

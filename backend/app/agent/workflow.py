@@ -30,9 +30,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from app.agent.after_sales import (
     STATUS_ELIGIBILITY_CHECK,
+    STATUS_PROCESSING,
     AfterSalesCaseManagerLike,
     AfterSalesCaseOutcome,
     AfterSalesInvestigationOutcome,
+    AfterSalesTreatmentOutcome,
+    AfterSalesTreatmentPlannerLike,
     CaseInvestigatorLike,
 )
 from app.agent.entities import DeterministicEntityExtractor, EntityExtractor, ExtractedEntities
@@ -198,6 +201,7 @@ class AgentWorkflow:
         llm_responder: 'FinalResponder | None' = None,
         case_manager: AfterSalesCaseManagerLike | None = None,
         case_investigator: CaseInvestigatorLike | None = None,
+        treatment_planner: AfterSalesTreatmentPlannerLike | None = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
@@ -211,6 +215,7 @@ class AgentWorkflow:
         self._llm_responder = llm_responder
         self._case_manager = case_manager
         self._case_investigator = case_investigator
+        self._treatment_planner = treatment_planner
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -250,6 +255,10 @@ class AgentWorkflow:
     @property
     def case_investigator(self) -> CaseInvestigatorLike | None:
         return self._case_investigator
+
+    @property
+    def treatment_planner(self) -> AfterSalesTreatmentPlannerLike | None:
+        return self._treatment_planner
 
 
     def run(
@@ -449,6 +458,17 @@ class AgentWorkflow:
         state.after_sales_case = case
         state.after_sales_eligibility = investigation.eligibility
         state.after_sales_investigation = investigation.investigation
+
+        # Phase 9D: an eligible case additionally gets a deterministic treatment
+        # plan and an after-sales ticket. Nothing is executed here - the plan
+        # only records what a later phase must do (docs/DECISIONS.md Decision 047).
+        treatment = self._run_case_treatment(state, investigation)
+        if treatment is not None:
+            case = treatment.case.to_dict()
+            state.after_sales_case = case
+            state.after_sales_treatment = treatment.treatment
+            state.after_sales_ticket = treatment.ticket
+
         return AgentResult(
             status=(
                 AgentResultStatus.NEEDS_CLARIFICATION
@@ -461,7 +481,42 @@ class AgentWorkflow:
             after_sales_case=case,
             after_sales_eligibility=investigation.eligibility,
             after_sales_investigation=investigation.investigation,
+            after_sales_treatment=state.after_sales_treatment,
+            after_sales_ticket=state.after_sales_ticket,
         )
+
+    def _run_case_treatment(
+        self, state: AgentState, investigation: AfterSalesInvestigationOutcome
+    ) -> AfterSalesTreatmentOutcome | None:
+        """Phase 9D Treatment Planning -> Ticket Creation (no execution).
+
+        Runs only for a case whose deterministic eligibility is a definite
+        True: a rejected or inconclusive case must not get an execution ticket.
+        The injected planner owns the treatment rules and the TicketService; a
+        failure must never break the chat flow and is never reported as a
+        successfully created ticket.
+        """
+        if self._treatment_planner is None:
+            return None
+        eligibility = (
+            investigation.eligibility
+            if isinstance(investigation.eligibility, dict)
+            else {}
+        )
+        if eligibility.get("eligible") is not True:
+            return None
+        if investigation.status != STATUS_PROCESSING:
+            return None
+        state.status = WorkflowStage.CASE_TREATMENT
+        try:
+            return self._treatment_planner.plan_and_register(
+                investigation.case, eligibility
+            )
+        except Exception as exc:  # guarded boundary: chat must keep working
+            logger.warning(
+                "after-sales treatment planning failed: %s", type(exc).__name__
+            )
+            return None
 
     def _run_case_investigation(
         self, state: AgentState, outcome: AfterSalesCaseOutcome

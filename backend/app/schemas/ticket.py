@@ -12,6 +12,8 @@ class TicketCreateRequest(BaseModel):
 
     user_id: int = Field(gt=0)
     order_id: int | None = Field(default=None, gt=0)
+    # Phase 9D: optional link to the after-sales case this ticket belongs to.
+    case_id: int | None = Field(default=None, gt=0)
     category: str = Field(min_length=1, max_length=50)
     priority: TicketPriority = TicketPriority.MEDIUM
     description: str = Field(min_length=1, max_length=5000)
@@ -23,6 +25,8 @@ class TicketOut(BaseModel):
     id: int
     user_id: int
     order_id: int | None
+    # Phase 9D: after-sales case row id (None for ordinary support tickets).
+    case_id: int | None = None
     category: str
     priority: TicketPriority
     status: TicketStatus
@@ -36,6 +40,7 @@ class TicketOut(BaseModel):
             id=ticket.id,
             user_id=ticket.user_id,
             order_id=ticket.order_id,
+            case_id=ticket.case_id,
             category=ticket.category,
             priority=ticket.priority,
             status=ticket.status,

@@ -458,7 +458,9 @@ def test_alembic_chain_creates_after_sales_cases(tmp_path):
     # SQLite reports the flag as 1 instead of True, so compare truthiness.
     assert unique_case_ids and unique_case_ids[0]["unique"]
 
-    downgraded = run_alembic("downgrade", "-1")
+    # Phase 9D added a later revision (tickets.case_id), so head is no longer
+    # the after-sales revision: step back over both to exercise that downgrade.
+    downgraded = run_alembic("downgrade", "-2")
     assert downgraded.returncode == 0, downgraded.stderr
     tables_after_downgrade, _, _ = schema_snapshot()
     assert "after_sales_cases" not in tables_after_downgrade

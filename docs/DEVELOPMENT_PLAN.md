@@ -26,7 +26,8 @@
 - **Phase 9A — After-Sales Domain Model:completed**(售后案件领域模型,不接入 Agent)
 - **Phase 9B — After-Sales Case Agent Integration:completed**(Agent 识别售后处理请求并创建 / 更新 Case,完成基础信息收集;不执行退款 / 换货 / 维修)
 - **Phase 9C — After-Sales Investigation + Eligibility:completed**(ELIGIBILITY_CHECK 案件自动完成 Order / Policy 调查并由确定性 Eligibility Engine 给出资格判定;不执行退款 / 换货 / 维修)
-- **Phase 9D 及以后 — 售后执行(退款 / 换货 / 维修)、真实 Embedding / pgvector 与规模化评测:not started**
+- **Phase 9D — After-Sales Treatment Plan + Ticket Creation:completed**(eligible=true 的案件生成确定性处理方案并创建 / 复用售后工单;不执行任何业务动作)
+- **Phase 9E 及以后 — 售后执行(退款 / 换货 / 维修)、真实 Embedding / pgvector 与规模化评测:not started**
 - **Phase 9 — Final Demo(现场彩排 / 验收 / 收尾):not started**
 
 ## Phase 1 — Foundation [COMPLETED]
@@ -280,3 +281,26 @@
 - **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 045 / 046、ARCHITECTURE.md §26。
 
 说明：Phase 9C 只做调查与资格判定，不进入 Phase 9D；`AfterSalesCase` 仍不触发任何退款 / 换货 / 维修执行。
+
+## Phase 9D — After-Sales Treatment Plan + Ticket Creation [COMPLETED]
+
+已完成 Phase 9D：让已经确认 `eligible=true` 的 AfterSalesCase 由确定性规则生成结构化**处理方案**并创建 / 复用**售后工单**。本阶段只做「准备怎么处理 + 建工单」，**不执行**任何退款 / 换货 / 维修，不修改 RefundService / CancelOrder / Risk Gate / ApprovalService / Verify。
+
+- **新增调用链**：`Understand → Case Upsert → Order Investigation → Policy Retrieval → Eligibility Check → Treatment Plan → Ticket Creation → Finalize`。只有 `eligible is True` 且案件状态为 `PROCESSING` 时才会进入本阶段；`REJECTED` / `INFORMATION_COLLECTION` / `ELIGIBILITY_CHECK` 一律不生成执行型工单。
+- **TreatmentPlan 由谁决定**（Decision 047）：`用户请求(requested_action) + Case + EligibilityResult + 业务规则 → TreatmentPlan`。`TreatmentPlanner`（`backend/app/after_sales/treatment.py`，纯领域：无 SQLAlchemy / 无 Service / 无 LLM / 无 retrieval，测试含源码级 import 守卫）只做三件事：确认用户**自己提出**的动作（REFUND / EXCHANGE / REPAIR）、或在无法确认时**拒绝行动**。它永远不会把退款请求变成换货，也不会为 UNKNOWN 诉求自选动作。LLM 只负责语言理解，不能决定业务动作。
+- **TreatmentPlan 字段**：`action` / `reason` / `case_id` / `case_status` / `case_type` / `order_id` / `order_ref` / `required_next_step` / `requires_execution` / `requires_human_review` / `executable` / `ticket_category` / `policy_citations`，全部可序列化。
+- **Ticket 与 Case 的关系**（审计结论 + 最小改动）：既有 `Ticket` 已能承载 `user / order / category / priority / description / status`，但缺少与案件的可靠关联。因此新增 `tickets.case_id → after_sales_cases.id`（可空 + 索引，Alembic 迁移 `8b1f3c5d7e90`，`batch_alter_table` 同时兼容 SQLite 与 PostgreSQL）。可空是刻意设计：普通支持工单没有 Case；1 个 Case 可以有 N 个 Ticket，因此不加 unique。**没有新增第二张表**。
+- **Treatment Plan 存放位置**：`after_sales_cases.collected_information["treatment_plan"]`（复用既有 JSON 列，与 9C 的 `eligibility` 一致），不新建第二套模型；工单块（id / ref / category / priority / status / created / count）嵌入其中。
+- **Ticket 创建路径**：`AgentWorkflow → AfterSalesTreatmentService（经注入的 `AfterSalesTreatmentPlannerLike` Protocol）→ 既有 TicketService → TicketRepository → DB`；Agent 层不接触数据库，也不 import Service。
+- **幂等**：创建前先按 `case_id` 查已有工单，存在即复用（`created=false`），不会出现 Ticket A / B / C。真正的重试风险（同一案件被再次处理）由测试与 Evaluation 的「重复运行同一 Case」case 覆盖。
+- **工单描述**：使用结构化模板（售后类型 / 申请动作 / 问题描述 / 订单 + 订单状态 / 资格判断 / 政策依据 / 下一步）。订单状态、资格判断、政策依据全部取自已有调查结果与检索到的 citation，LLM 不能编造；问题描述保留用户原话。
+- **失败处理**：工单创建失败时**不**谎称「工单已创建」，不伪造 ticket_id；错误写入 `treatment_plan.ticket_error` 并 `ticket_registered=false`，案件状态保持不变，返回值带明确 error。
+- **案件状态语义不变**：`PROCESSING` 仍表示「售后处理任务已建立，可以进入后续执行」，本阶段不推进为 `COMPLETED`。
+- **Demo**：`ORD-1003` 两轮真实对话（「我的耳机坏了，帮我处理一下。」→「订单是 ORD-1003，我想换货。」）→ Case `PROCESSING` / `eligible=true` / Treatment `EXCHANGE` / Ticket `TICKET-<id>` / 下一步「等待后续换货执行」；**绝不真正执行换货**。注意：售后时效按**真实时钟**判定，seed 的签收时间是固定的 2026-08-22，因此线上（未固定 reference_time 的）demo 可能得到 `REJECTED`——这是确定性引擎的正确行为。`/api/v1/demo/chat` 新增可选 `reference_time`，用于把脚本化 demo / 评测的时效窗口固定下来（前端不发该字段，页面默认走真实时钟）。
+- **Observability**：复用既有 timeline（不新增第二套 trace），新增 `Treatment Plan` / `Ticket Creation` 步骤；payload 新增 `treatment` / `ticket`，`/chat` 可看到 Case ID / Eligibility / Treatment Action / Ticket ID / Case status，前端无需改动。
+- **Evaluation**：新增 6 个固定 case（合法换货 / 超窗口 / 订单不存在 / 用户不匹配 / UNKNOWN 诉求 / 同一 Case 重复运行）与 5 项指标：`treatment_plan_accuracy` / `ticket_creation_success` / `ticket_id_presence` / `duplicate_ticket_rate` / `execution_not_triggered`。重复运行 case 由 runner 恢复 `ELIGIBILITY_CHECK` 后重放同一消息，验证「只有 1 个 Ticket」。不编造业务 KPI。
+- **架构原则**：LLM = language understanding；RAG = policy grounding；Business System = authoritative facts；Eligibility Engine = 业务资格判定；Treatment Planner = 受约束的业务动作规划；Ticket Service = 业务记录创建；Risk Gate = 执行授权；HITL = 人工审批；Execute = 真正的业务变更；Verify = 执行后校验。本阶段只碰前六者中的「Treatment Planner / Ticket Service」。
+- **测试**：新增 `tests/test_after_sales_treatment.py`（25 例）；`tests/test_demo_api.py` 新增 2 例真实 HTTP 链路；`tests/test_evaluation.py` 新增 2 例；`tests/test_after_sales_case.py` 的迁移链测试由 `downgrade -1` 调整为 `downgrade -2`（9D 之后 head 不再是 9A 修订，测试意图不变）。全量 **509 例**通过（480 → 509，无既有断言削弱），backend `compileall` 通过，零新增第三方依赖。
+- **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 047、ARCHITECTURE.md §27、README.md。
+
+说明：Phase 9D 只做处理方案与工单，不进入 Phase 9E；退款 / 换货 / 维修的**执行**、金额计算与人工复核流程仍属后续阶段。

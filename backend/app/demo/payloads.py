@@ -245,6 +245,59 @@ def _investigation_timeline_steps(
     return steps
 
 
+def _treatment_timeline_steps(
+    treatment: JsonDict, ticket: JsonDict | None
+) -> list[JsonDict]:
+    """Phase 9D timeline: Treatment Plan -> Ticket Creation.
+
+    Replays exactly what the deterministic planner/service recorded; the agent
+    layer never re-derives a treatment (no second trace system).
+    """
+    action = treatment.get("action")
+    executable = bool(treatment.get("executable"))
+    if action:
+        detail = (
+            f"{treatment.get('action_label') or action} · "
+            f"{treatment.get('required_next_step') or ''}"
+        ).strip(" ·")
+    else:
+        detail = str(treatment.get("reason") or "未生成可执行处理方案")
+    steps: list[JsonDict] = [
+        {
+            "label": "Treatment Plan",
+            "state": "success" if executable else "pending",
+            "detail": detail,
+            "action": action,
+            "requires_execution": bool(treatment.get("requires_execution")),
+            "required_next_step": treatment.get("required_next_step"),
+        }
+    ]
+    if not executable:
+        # Not eligible / no confirmed action: no ticket is created at all.
+        return steps
+    if isinstance(ticket, dict) and ticket.get("id") is not None:
+        steps.append(
+            {
+                "label": "Ticket Creation",
+                "state": "success",
+                "detail": (
+                    f"{ticket.get('ref') or ticket.get('id')} · "
+                    f"{ticket.get('category')} · "
+                    f"{'新建' if ticket.get('created') else '复用已有工单'}"
+                ),
+            }
+        )
+    else:
+        steps.append(
+            {
+                "label": "Ticket Creation",
+                "state": "failed",
+                "detail": "售后工单创建失败,需要人工跟进",
+            }
+        )
+    return steps
+
+
 def _summarize_tool_result(result: dict[str, Any]) -> str:
     tool = str(result.get("tool_name") or "")
     status = str(result.get("status") or "")
@@ -386,6 +439,14 @@ def _build_timeline(
             _investigation_timeline_steps(
                 eligibility,
                 investigation if isinstance(investigation, dict) else {},
+            )
+        )
+    treatment = state.after_sales_treatment or result.after_sales_treatment
+    ticket = state.after_sales_ticket or result.after_sales_ticket
+    if isinstance(treatment, dict) and treatment:
+        steps.extend(
+            _treatment_timeline_steps(
+                treatment, ticket if isinstance(ticket, dict) else None
             )
         )
     route_value = result.route.value if result.route else (state.route.value if state.route else None)
@@ -574,6 +635,9 @@ def build_run_payload(
     investigation_block = (
         state.after_sales_investigation or result.after_sales_investigation
     )
+    # Phase 9D: deterministic treatment plan + the after-sales ticket (if any).
+    treatment_block = state.after_sales_treatment or result.after_sales_treatment
+    ticket_block = state.after_sales_ticket or result.after_sales_ticket
 
     risk: JsonDict | None = None
     approval_block: JsonDict | None = None
@@ -667,6 +731,10 @@ def build_run_payload(
         "investigation": (
             dict(investigation_block) if isinstance(investigation_block, dict) else None
         ),
+        "treatment": (
+            dict(treatment_block) if isinstance(treatment_block, dict) else None
+        ),
+        "ticket": (dict(ticket_block) if isinstance(ticket_block, dict) else None),
         "expected_refund": {"amount": expected_amount, "order_ref": expected_refund_order}
         if expected_amount is not None
         else None,
@@ -705,7 +773,10 @@ def build_text(
     case = state.after_sales_case or result.after_sales_case
     if isinstance(case, dict) and case.get("case_id"):
         return _case_text(
-            case, state.after_sales_eligibility or result.after_sales_eligibility
+            case,
+            state.after_sales_eligibility or result.after_sales_eligibility,
+            state.after_sales_treatment or result.after_sales_treatment,
+            state.after_sales_ticket or result.after_sales_ticket,
         )
 
     if status in (AgentResultStatus.WAITING_USER_CONFIRMATION.value,):
@@ -770,13 +841,20 @@ def _missing_asks(missing: list[str]) -> str:
     return "，并".join(asks)
 
 
-def _case_text(case: JsonDict, eligibility: JsonDict | None = None) -> str:
-    """Deterministic reply for the after-sales case branch (9B + 9C).
+def _case_text(
+    case: JsonDict,
+    eligibility: JsonDict | None = None,
+    treatment: JsonDict | None = None,
+    ticket: JsonDict | None = None,
+) -> str:
+    """Deterministic reply for the after-sales case branch (9B + 9C + 9D).
 
     Phase 9B asks only for what is really missing. Phase 9C additionally
-    reports the deterministic eligibility conclusion. The text only repeats
-    what the case row and the EligibilityResult already decided: it never
-    re-derives eligibility and never invents a policy claim.
+    reports the deterministic eligibility conclusion. Phase 9D reports the
+    treatment plan and the after-sales ticket that was really created. The text
+    only repeats what the case row, the EligibilityResult and the treatment plan
+    already decided: it never re-derives eligibility, never invents a policy
+    claim and never claims a ticket that was not created.
     """
     if not isinstance(eligibility, dict) or not eligibility:
         collected = case.get("collected_information")
@@ -786,6 +864,25 @@ def _case_text(case: JsonDict, eligibility: JsonDict | None = None) -> str:
     missing = [str(item) for item in (case.get("missing_information") or [])]
     action = _CASE_ACTION_LABEL.get(str(case.get("requested_action") or ""), "售后")
     reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
+
+    # Phase 9D: only an executable plan (definite eligibility + a request the
+    # user actually made) may claim a treatment/ticket. Everything else keeps
+    # the 9B/9C wording below.
+    if isinstance(treatment, dict) and treatment.get("executable"):
+        action_label = _CASE_ACTION_LABEL.get(
+            str(treatment.get("action") or ""), action
+        )
+        next_step = str(treatment.get("required_next_step") or "等待后续执行")
+        if isinstance(ticket, dict) and ticket.get("id") is not None:
+            return (
+                f"{reason or ''}已生成{action_label}处理方案，"
+                f"并创建售后工单 {ticket.get('ref') or ticket.get('id')}，"
+                f"下一步：{next_step}。"
+            )
+        return (
+            f"{reason or ''}已生成{action_label}处理方案，"
+            "但售后工单创建失败，未执行任何业务操作，请联系人工客服跟进。"
+        )
 
     if reason and not missing:
         if eligibility.get("eligible") is True:
