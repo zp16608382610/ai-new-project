@@ -5,8 +5,11 @@ repository-free - it maps (operation, business context) -> RiskDecision.
 """
 from decimal import Decimal
 
+import pytest
+
 from app.risk import (
     HIGH_VALUE_REFUND_THRESHOLD,
+    LOW_RISK_REFUND_POLICY_ID,
     RiskAction,
     RiskContext,
     RiskDecision,
@@ -106,3 +109,80 @@ def test_risk_decision_serialization_roundtrip():
     )
     restored = RiskDecision.from_dict(decision.to_dict())
     assert restored == decision
+
+# ---- Phase 9F: the ONLY automatic refund path ------------------------------
+
+
+def _low_risk_refund_context(**overrides):
+    """A standard, already-verified after-sales refund context.
+
+    Every value is a business fact the workflow copies from the persisted case
+    and the deterministic eligibility result; none of it is user- or
+    model-supplied.
+    """
+    facts = dict(
+        order_id=1003,
+        refund_amount=Decimal("199.00"),
+        eligibility_passed=True,
+        case_type="QUALITY_ISSUE",
+        requested_action="REFUND",
+        order_status="DELIVERED",
+        items_returnable=True,
+        active_refund_count=0,
+    )
+    facts.update(overrides)
+    return RiskContext(**facts)
+
+
+def _refund_decision(**overrides):
+    return RiskEngine().evaluate("CREATE_REFUND", _low_risk_refund_context(**overrides))
+
+
+def test_standard_low_risk_refund_auto_executes():
+    decision = _refund_decision()
+    assert decision.risk_level is RiskLevel.LOW
+    assert decision.action is RiskAction.AUTO_EXECUTE
+    assert decision.policy_id == LOW_RISK_REFUND_POLICY_ID
+
+
+def test_low_risk_refund_context_roundtrip():
+    context = _low_risk_refund_context()
+    assert RiskContext.from_dict(context.to_dict()) == context
+
+
+def test_refund_above_the_threshold_is_never_low_risk():
+    decision = _refund_decision(refund_amount=Decimal("5000"))
+    assert decision.risk_level is RiskLevel.CRITICAL
+    assert decision.action is RiskAction.HUMAN_APPROVAL
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"eligibility_passed": False},
+        {"eligibility_passed": None},
+        {"requested_action": "EXCHANGE"},
+        {"case_type": "LOGISTICS_DISPUTE"},
+        {"order_status": "PAID"},
+        {"order_status": None},
+        {"active_refund_count": 1},
+        {"active_refund_count": None},
+        {"items_returnable": False},
+        {"items_returnable": None},
+        {"order_id": None},
+        {"refund_amount": None},
+        {"refund_amount": HIGH_VALUE_REFUND_THRESHOLD},
+    ],
+)
+def test_low_risk_refund_requires_every_business_fact(overrides):
+    """One missing / unknown fact -> never AUTO_EXECUTE (fail closed)."""
+    decision = _refund_decision(**overrides)
+    assert decision.action is RiskAction.HUMAN_APPROVAL
+    assert decision.action is not RiskAction.AUTO_EXECUTE
+
+
+def test_unknown_items_returnable_is_not_low_risk():
+    # Phase 9F: True is required; False and None both refuse the auto path.
+    assert _refund_decision(items_returnable=True).action is RiskAction.AUTO_EXECUTE
+    assert _refund_decision(items_returnable=False).action is RiskAction.HUMAN_APPROVAL
+    assert _refund_decision(items_returnable=None).action is RiskAction.HUMAN_APPROVAL

@@ -155,6 +155,16 @@ class AfterSalesCaseManagerLike(Protocol):
         """Return the upserted case, or None when the message is not a case."""
         ...
 
+    def is_case_request(self, user_message: str) -> bool:
+        """Whether the message is an after-sales case request (Phase 9F).
+
+        The workflow's business-priority routing calls this before the legacy
+        refund branch: a refund request that also reports a product problem is
+        a case. Implementations must use the same detector as ``handle`` so the
+        routing decision and the case creation never disagree.
+        """
+        ...
+
 
 class AfterSalesCaseDetector(Protocol):
     """Interface implemented by the deterministic and future detectors."""

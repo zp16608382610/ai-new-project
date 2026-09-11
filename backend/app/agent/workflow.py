@@ -385,9 +385,20 @@ class AgentWorkflow:
         # Phase 9B: after-sales case upsert. Gated on the intents the existing
         # pipeline cannot handle, so every existing intent -> route behaviour
         # (RAG / Order / Logistics / Cancel / Refund / Ticket) is untouched.
-        if self._case_manager is not None and state.intent in (
-            Intent.UNSUPPORTED,
-            Intent.AMBIGUOUS,
+        #
+        # Phase 9F business priority: a message that asks for a refund AND
+        # reports a product problem ("...耳机坏了...我要退款") is an after-sales
+        # CASE, not the legacy one-shot REFUND_TOOL flow, so it must run the
+        # full Case -> Investigation -> Eligibility -> Treatment -> Execute
+        # chain. The deterministic after-sales detector owns that decision; a
+        # plain "我要退款" reports no case signal, so the legacy refund flow
+        # (and every other existing route) is unchanged.
+        if self._case_manager is not None and (
+            state.intent in (Intent.UNSUPPORTED, Intent.AMBIGUOUS)
+            or (
+                state.intent == Intent.REFUND_REQUEST
+                and self._is_after_sales_case_request(state.user_message)
+            )
         ):
             case_result = self._run_case_management(state, active_case_id=active_case_id)
             if case_result is not None:
@@ -423,6 +434,23 @@ class AgentWorkflow:
                 escalation_required=True,
             )
         raise RuntimeError(f"Unhandled route: {decision.route}")
+
+    def _is_after_sales_case_request(self, user_message: str) -> bool:
+        """Whether the deterministic detector sees an after-sales case request.
+
+        Phase 9F routing probe only: the detector owns the decision (product
+        quality / damage, logistics dispute, exchange, repair, and no explicit
+        human handoff). A case manager that does not expose the probe (an older
+        implementation or a test double) keeps the previous routing untouched.
+        """
+        probe = getattr(self._case_manager, "is_case_request", None)
+        if probe is None:
+            return False
+        try:
+            return bool(probe(user_message))
+        except Exception:  # a probe failure must never break the chat flow
+            logger.warning("after-sales case detection probe failed")
+            return False
 
     def _run_case_management(
         self, state: AgentState, *, active_case_id: str | None = None
@@ -1094,7 +1122,7 @@ class AgentWorkflow:
         context = RiskContext(
             request_id=state.request_id,
             user_id=state.user_id,
-            refund_amount=refund_amount,
+            **_risk_context_facts(state, refund_amount=refund_amount),
         )
         return self._risk_engine.evaluate(request.tool_name, context)
 
@@ -1386,6 +1414,48 @@ def _plan_refund_execution_request(state: AgentState) -> ToolRequest:
         ),
         requires_confirmation=False,
     )
+
+
+def _risk_context_facts(
+    state: AgentState, *, refund_amount: Decimal | None
+) -> dict:
+    """Authoritative after-sales facts for the Risk Gate (Phase 9F).
+
+    Every value is copied from the PERSISTED AfterSalesCase and from the
+    deterministic eligibility result the workflow already computed - never from
+    the user message, the LLM proposal or any other untrusted input. A fact that
+    was not established stays None, and the risk policy treats None as "cannot
+    prove low risk" (docs/DECISIONS.md Decision 049).
+
+    The legacy one-shot REFUND_TOOL flow has no case and therefore no facts:
+    its refunds keep the previous HIGH -> HUMAN_APPROVAL behaviour.
+    """
+    case = state.after_sales_case if isinstance(state.after_sales_case, dict) else {}
+    eligibility = (
+        state.after_sales_eligibility
+        if isinstance(state.after_sales_eligibility, dict)
+        else {}
+    )
+    business = (
+        eligibility.get("business_facts")
+        if isinstance(eligibility.get("business_facts"), dict)
+        else {}
+    )
+    order_id = case.get("order_id")
+    if order_id is None and state.entities is not None:
+        order_id = state.entities.order_id
+    return {
+        "order_id": order_id,
+        "refund_amount": refund_amount,
+        "after_sales_case_id": case.get("case_id"),
+        "case_type": case.get("case_type"),
+        "requested_action": case.get("requested_action"),
+        "eligibility_passed": eligibility.get("eligible"),
+        "order_status": business.get("order_status"),
+        "items_returnable": business.get("items_returnable"),
+        "active_refund_count": business.get("active_refund_count"),
+        "days_since_delivery": business.get("days_since_delivery"),
+    }
 
 
 def _find_tool_result(

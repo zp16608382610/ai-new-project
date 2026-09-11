@@ -116,6 +116,17 @@ class AfterSalesCaseManager:
             active, signal=signal, order_ref=order_ref, user_message=user_message
         )
 
+    def is_case_request(self, user_message: str) -> bool:
+        """Whether the message is an after-sales case request (Phase 9F gate).
+
+        The workflow uses this for its business-priority routing: a refund
+        request that ALSO reports a product problem must enter the after-sales
+        Case chain instead of the legacy one-shot refund flow. This is the very
+        detector ``handle`` uses, so the routing decision and the case creation
+        can never disagree.
+        """
+        return bool(self.detector.detect(user_message).is_case_request)
+
     # -- create / update ----------------------------------------------------
 
     def _create_case(

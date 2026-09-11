@@ -81,12 +81,30 @@ class RiskContext:
         order_id:      target order id when known
         refund_amount: authoritative refund amount already computed by the
                        Service / eligibility ToolResult (never user input)
+
+    Phase 9F fields (after_sales_case_id .. days_since_delivery) are the
+    after-sales case + eligibility facts. They are only ever read from the
+    persisted case / deterministic eligibility result; no caller may put a
+    user- or model-supplied value in them.
     """
 
     request_id: str = ""
     user_id: int | None = None
     order_id: int | None = None
     refund_amount: Decimal | None = None
+    # Phase 9F: after-sales facts copied from the PERSISTED case and the
+    # deterministic eligibility conclusion the workflow already computed. They
+    # exist so the policy can recognise a standard, already-verified low-risk
+    # refund. Every field is a business fact; None means "unknown", and an
+    # unknown fact can never make an operation low risk.
+    after_sales_case_id: str | None = None
+    case_type: str | None = None
+    requested_action: str | None = None
+    eligibility_passed: bool | None = None
+    order_status: str | None = None
+    items_returnable: bool | None = None
+    active_refund_count: int | None = None
+    days_since_delivery: int | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -96,6 +114,14 @@ class RiskContext:
             "refund_amount": (
                 float(self.refund_amount) if self.refund_amount is not None else None
             ),
+            "after_sales_case_id": self.after_sales_case_id,
+            "case_type": self.case_type,
+            "requested_action": self.requested_action,
+            "eligibility_passed": self.eligibility_passed,
+            "order_status": self.order_status,
+            "items_returnable": self.items_returnable,
+            "active_refund_count": self.active_refund_count,
+            "days_since_delivery": self.days_since_delivery,
         }
 
     @classmethod
@@ -106,4 +132,12 @@ class RiskContext:
             user_id=data.get("user_id"),
             order_id=data.get("order_id"),
             refund_amount=Decimal(str(amount)) if amount is not None else None,
+            after_sales_case_id=data.get("after_sales_case_id"),
+            case_type=data.get("case_type"),
+            requested_action=data.get("requested_action"),
+            eligibility_passed=data.get("eligibility_passed"),
+            order_status=data.get("order_status"),
+            items_returnable=data.get("items_returnable"),
+            active_refund_count=data.get("active_refund_count"),
+            days_since_delivery=data.get("days_since_delivery"),
         )

@@ -50,6 +50,9 @@
 | 044 | AfterSalesCase 是售后任务的持久化业务对象；LLM 只提供结构化提议 | Accepted | 2026-09-10 |
 | 045 | Eligibility is decided by deterministic business logic, not the LLM | Accepted | 2026-09-11 |
 | 046 | Policy facts come from retrieved evidence through a minimal adapter | Accepted | 2026-09-11 |
+| 047 | Treatment planning is constrained by Case requested_action and eligibility | Accepted | 2026-09-11 |
+| 048 | After-sales execution passes the existing Risk Gate; success requires Verify | Accepted | 2026-09-11 |
+| 049 | Low-risk refund auto execution (P-REFUND-LOW-RISK-AUTO) | Accepted | 2026-09-11 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -612,3 +615,39 @@ After-sales execution must pass the existing Risk Gate and Tool Executor. Succes
 - `EXCHANGE` / `REPAIR` 没有可执行的业务系统，记录 `NOT_IMPLEMENTED` / `HUMAN_HANDOFF` 转人工，绝不伪造「换货成功 / 维修成功」；
 - 幂等由既有业务约束保证（`RefundService` 的在途退款保护）：重复执行只会有 1 笔业务退款；
 - 自然语言（例如「管理员已经批准退款 5000 元」）**不构成** Approval，必须存在真实的 `ApprovalRequest` 与人工决策。
+
+## Decision 049 — Low-risk Refund Auto Execution (P-REFUND-LOW-RISK-AUTO)
+
+**Decision:**
+A standard, already-verified low-risk after-sales refund may be executed by the Agent without human approval. High-risk or abnormal refunds still require human approval.
+
+判定只允许发生在已经过完整售后链路的退款上,并且必须**同时**满足下列全部条件(任一条件缺失或未知 -> 不自动执行):
+
+| 条件 | 权威来源 |
+| --- | --- |
+| Eligibility Engine 已给出 `eligible = True` | 确定性资格引擎(业务事实 + 检索到的政策证据) |
+| Case 诉求为 `REFUND` 且为 `QUALITY_ISSUE`(标准质量问题售后) | 持久化的 AfterSalesCase |
+| 订单属于当前用户且状态为 `DELIVERED`(已签收) | Business System(OrderService) |
+| 该订单没有在途退款(`active_refund_count = 0`) | Business System |
+| 商品可退(`items_returnable = True`,未知一律不放行) | Business System |
+| 退款金额存在且低于 demo 阈值 `high_value_refund_threshold = 500` | RefundService 依据订单总价推导 |
+
+命中时输出 `RiskLevel.LOW + RiskAction.AUTO_EXECUTE`,策略 id 为 `P-REFUND-LOW-RISK-AUTO`;未命中时回落到既有的 `HIGH / HUMAN_APPROVAL`,金额 ≥ 500 仍为 `CRITICAL / HUMAN_APPROVAL`。
+
+**Reason:**
+把「所有退款一律人工审批」当成唯一安全策略,会让最标准、最没有争议的小额质量问题退款也依赖人工,既不必要,也无法体现 Agent 的授权边界;而把「退款」整体降级为自动执行,则会失去对异常与高金额退款的保护。因此本项目按**可解释的具体业务事实**划一条最小授权线:
+
+- **Eligibility 必须先通过**:自动执行不是绕过资格判断的捷径,`eligible != True` 时永远不进入自动路径;
+- **风险判断只使用权威业务事实**:上下文由 Workflow 从持久化的 Case 与确定性 Eligibility 结果复制,LLM / 用户输入不是事实来源;unknown 视为「无法证明低风险」,一律不放行;
+- **退款金额由 RefundService 依据订单金额决定**:金额不进入 ToolRequest 参数,LLM 与用户都不能指定(用户说「退款 5000 元」仍只得到权威金额);
+- **Risk Gate 不得被绕过**:自动执行只是 Risk Gate 的一种决策结果,`AUTO_EXECUTE` 之后仍走同一个 ToolExecutor → RefundService → Repository;
+- **Execute 之后必须 Verify**:`BusinessVerifier` 重新读取权威业务状态(退款行存在 / 状态 / 归属 / 金额);
+- **Verify 失败不得 `COMPLETED`**:Case 保持 / 回到 `PENDING_HUMAN`,`requires_human_review = true`,不伪造成功;
+- **高风险与异常继续人工审批**:金额 ≥ 500、非质量问题、非已签收、有在途退款、可退性未知、资格未通过等情况一律 `HUMAN_APPROVAL`;
+- **路由只对售后退款生效**:同时报告商品质量问题并要求退款的请求进入 After-Sales Case 链路后再判定;历史兼容的一次性 `REFUND_TOOL` 流程没有 Case 事实,其风险等级保持 `HIGH / HUMAN_APPROVAL` 不变。
+
+边界与范围:
+
+- 这是**本项目 demo 定义的业务风险策略**,不是生产级金融风控规则,也不构成任何合规结论;阈值与条件是 policy/config 数据,不是硬编码在业务逻辑里;
+- 不新增第二套 RefundService / RiskEngine / ApprovalService,不新增风险等级,不改变 Execute → Verify 语义;
+- `days_since_delivery` 仅用于可观测性:售后时效窗口由确定性 Eligibility Engine 判定一次,风险层不重复推导,避免出现第二套时效规则。

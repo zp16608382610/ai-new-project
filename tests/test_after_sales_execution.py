@@ -1,8 +1,14 @@
-"""Phase 9E: after-sales execution + Execute -> Verify tests.
+"""Phase 9E/9F: after-sales execution + Execute -> Verify tests.
 
-Spec coverage (Phase 9E objective):
+Phase 9F: a refund request that also reports a product problem enters the
+after-sales Case chain, and a standard, already-verified low-risk refund
+(ORD-1003 / 199) is auto-executed. The human-approval path is therefore
+exercised with the high-value order ORD-1001 / 1299 (CRITICAL), which is also
+what the Evaluation dataset uses.
 
-    Risk         1  a refund really passes the existing Risk Gate first
+Spec coverage (Phase 9E/9F objective):
+
+    Risk         1  a low-risk standard refund passes the gate, then auto-executes
                  2  a high-risk refund requires human approval
                  3  an approval reject executes nothing
     Execute      4  execute calls the existing create_refund tool
@@ -45,7 +51,7 @@ from app.agent.state import AgentResultStatus, AgentState, WorkflowStage
 from app.agent.workflow import AgentWorkflow
 from app.db.base import Base
 from app.db.enums import RefundStatus
-from app.db.models import Order, Refund, Ticket
+from app.db.models import ApprovalRequest, Order, Refund, Ticket
 from app.db.seed import seed_dev_data
 from app.db.session import create_db_engine, create_session_factory
 from app.demo.demo_seed import prepare_demo_database, seed_demo_orders
@@ -134,6 +140,12 @@ def _refunds(session, order_id):
     return list(session.scalars(stmt))
 
 
+def _approvals(session):
+    """The approval requests persisted in this demo database (Phase 9F)."""
+    stmt = select(ApprovalRequest).order_by(ApprovalRequest.id)
+    return list(session.scalars(stmt))
+
+
 def _tickets(session, case_id):
     view = AfterSalesService(session).get_case(case_id)
     return list(session.scalars(select(Ticket).where(Ticket.case_id == view.id)))
@@ -167,8 +179,9 @@ class _RecordingSpy:
 
 
 def test_refund_passes_the_risk_gate_before_it_writes(demo):
+    """High value -> the gate stops the write until a human decides."""
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
 
     assert run["route"] == "AFTER_SALES_CASE"
     assert run["intent"] == "AFTER_SALES_REQUEST"
@@ -178,11 +191,71 @@ def test_refund_passes_the_risk_gate_before_it_writes(demo):
     assert run["treatment"]["executable"] is True
     # the gate decision is visible on the execution block itself
     assert run["execution"]["status"] == "PENDING_APPROVAL"
-    assert run["execution"]["risk_level"] == "HIGH"
+    assert run["execution"]["risk_level"] == "CRITICAL"
     assert run["execution"]["tool"] == "create_refund"
-    # and nothing reached the business system
-    assert _refunds(session, 1003) == []
-    assert session.get(Order, 1003).status.value == "DELIVERED"
+    # a real approval exists, and nothing reached the business system
+    assert run["approval"]["status"] == "PENDING"
+    assert len(_approvals(session)) == 1
+    assert _refunds(session, 1001) == []
+    assert session.get(Order, 1001).status.value == "DELIVERED"
+
+
+def test_standard_low_risk_refund_auto_executes_without_approval(demo):
+    """Phase 9F: ORD-1003 / 199 -> LOW -> AUTO_EXECUTE -> Execute -> Verify.
+
+    The standard, already-verified low-risk refund is the ONLY refund path
+    that runs without a human: it still uses the real RefundService and the
+    real BusinessVerifier, and it produces no approval request at all.
+    """
+    session, store = demo
+    run = _chat(session, store, REFUND_MESSAGE)
+
+    assert run["route"] == "AFTER_SALES_CASE"
+    assert run["intent"] == "AFTER_SALES_REQUEST"
+    assert run["case"]["status"] == "COMPLETED"
+    assert run["run_status"] == "COMPLETED"
+    assert run["treatment"]["action"] == ACTION_REFUND
+    assert run["treatment"]["executable"] is True
+
+    # the gate decision: LOW / AUTO_EXECUTE, not HIGH / HUMAN_APPROVAL
+    assert run["execution"]["status"] == "COMPLETED"
+    assert run["execution"]["risk_level"] == "LOW"
+    assert run["execution"]["tool"] == "create_refund"
+    gate = [s for s in run["steps"] if s.get("label") == "Risk Gate"]
+    assert gate
+    assert {s["risk_level"] for s in gate} == {"LOW"}
+    assert {s["risk_action"] for s in gate} == {"AUTO_EXECUTE"}
+
+    # no human was asked: no approval request and no approval block
+    assert run.get("approval") is None
+    assert _approvals(session) == []
+
+    # the real service ran, and the verifier re-read the business state
+    assert run["execution"]["amount_source"].startswith("RefundService")
+    assert run["verification"]["passed"] is True
+    assert "refund_exists" in run["verification"]["checked"]
+    assert "amount_matches_order_total" in run["verification"]["checked"]
+    rows = _refunds(session, 1003)
+    assert len(rows) == 1
+    assert rows[0].status is RefundStatus.PENDING
+    assert rows[0].amount == Decimal("199.00")
+    assert run["execution"]["refund_id"] == rows[0].id
+    assert len(_tickets(session, run["case"]["case_id"])) == 1
+    assert "REFUND-" in run["text"]
+
+
+def test_auto_executed_refund_is_not_repeated(demo):
+    """A repeated low-risk request must not produce a second refund."""
+    session, store = demo
+    first = _chat(session, store, REFUND_MESSAGE)
+    assert first["case"]["status"] == "COMPLETED"
+
+    second = _chat(session, store, REFUND_MESSAGE, session_id="9e-auto-again")
+
+    assert len(_refunds(session, 1003)) == 1
+    assert (second.get("execution") or {}).get("status") != "COMPLETED"
+    assert second["case"]["status"] != "COMPLETED"
+    assert _approvals(session) == []
 
 
 def test_high_value_refund_requires_human_approval(demo):
@@ -197,15 +270,15 @@ def test_high_value_refund_requires_human_approval(demo):
 
 def test_rejected_approval_executes_nothing(demo):
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     final = _approve(session, store, run, approved=False)
 
     assert final["approval_resolution"]["status"] == "REJECTED"
     assert final["case"]["status"] == "PENDING_HUMAN"
     assert final["case"]["status"] != "COMPLETED"
     assert final["execution"]["status"] == "REJECTED"
-    assert _refunds(session, 1003) == []
-    assert session.get(Order, 1003).status.value == "DELIVERED"
+    assert _refunds(session, 1001) == []
+    assert session.get(Order, 1001).status.value == "DELIVERED"
 
 
 # ---- Execute (4-7) ---------------------------------------------------------
@@ -213,7 +286,7 @@ def test_rejected_approval_executes_nothing(demo):
 
 def test_approved_refund_executes_verifies_and_completes(demo):
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     ticket_id = run["treatment"]["ticket_id"]
 
     final = _approve(session, store, run, approved=True)
@@ -230,10 +303,10 @@ def test_approved_refund_executes_verifies_and_completes(demo):
     assert "refund_exists" in final["verification"]["checked"]
     assert "amount_matches_order_total" in final["verification"]["checked"]
 
-    rows = _refunds(session, 1003)
+    rows = _refunds(session, 1001)
     assert len(rows) == 1
     assert rows[0].status is RefundStatus.PENDING
-    assert rows[0].amount == Decimal("199.00")
+    assert rows[0].amount == Decimal("1299.00")
     assert final["execution"]["refund_id"] == rows[0].id
     # the case's own ticket still exists and is not duplicated
     assert len(_tickets(session, final["case"]["case_id"])) == 1
@@ -243,34 +316,33 @@ def test_approved_refund_executes_verifies_and_completes(demo):
 
 def test_refund_amount_comes_from_the_business_system(demo):
     session, store = demo
-    # The user names a wild amount; the case's refund is still 199 because the
-    # authoritative amount comes from the order via RefundService.
+    # The user names a wild amount; the executed refund is still 199 because
+    # the authoritative amount comes from the order via RefundService.
     run = _chat(session, store, "我的耳机坏了，订单 ORD-1003，退款 5000 元")
     assert run["treatment"]["action"] == ACTION_REFUND
-    assert run["execution"]["status"] == "PENDING_APPROVAL"
-
-    final = _approve(session, store, run, approved=True)
+    assert run["execution"]["status"] == "COMPLETED"
+    assert run["execution"]["risk_level"] == "LOW"
 
     rows = _refunds(session, 1003)
     assert len(rows) == 1
     assert rows[0].amount == Decimal("199.00")
-    assert final["execution"]["refund_amount"] == 199.0
-    assert "5000" not in final["text"]
+    assert run["execution"]["refund_amount"] == 199.0
+    assert "5000" not in run["text"]
 
 
 def test_llm_cannot_choose_the_refund_amount(demo):
     """A model-supplied amount must never reach the business service."""
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
 
     # The frozen ToolRequest snapshot carries only the order (and the case).
     request = run["case"]
-    assert request["order_id"] == 1003
+    assert request["order_id"] == 1001
     assert "amount" not in (run.get("treatment") or {})
     assert "amount" not in (run.get("execution") or {})
 
     final = _approve(session, store, run, approved=True)
-    assert final["execution"]["refund_amount"] == 199.0
+    assert final["execution"]["refund_amount"] == 1299.0
 
 
 def test_execute_failure_does_not_complete_the_case(demo, monkeypatch):
@@ -281,7 +353,7 @@ def test_execute_failure_does_not_complete_the_case(demo, monkeypatch):
 
     monkeypatch.setattr(RefundService, "create_refund", boom)
 
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     final = _approve(session, store, run, approved=True)
 
     assert final["case"]["status"] == "PENDING_HUMAN"
@@ -289,8 +361,8 @@ def test_execute_failure_does_not_complete_the_case(demo, monkeypatch):
     assert final["execution"]["status"] == "FAILED"
     # no fabricated refund id, no refund row, no completion
     assert final["execution"].get("refund_id") is None
-    assert _refunds(session, 1003) == []
-    assert session.get(Order, 1003).status.value == "DELIVERED"
+    assert _refunds(session, 1001) == []
+    assert session.get(Order, 1001).status.value == "DELIVERED"
 
 
 # ---- Verify (8-10) ---------------------------------------------------------
@@ -307,14 +379,14 @@ def test_successful_tool_call_is_not_enough_without_verification(demo, monkeypat
 
     monkeypatch.setattr(BusinessVerifier, "verify", refuse)
 
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     final = _approve(session, store, run, approved=True)
 
     assert final["execution"]["status"] == "VERIFICATION_FAILED"
     assert final["verification"]["passed"] is False
     assert final["case"]["status"] != "COMPLETED"
     # the write really happened - only the independent re-read failed
-    assert len(_refunds(session, 1003)) == 1
+    assert len(_refunds(session, 1001)) == 1
 
 
 def test_recorder_refuses_to_complete_without_verification(db_session):
@@ -374,15 +446,15 @@ def test_recorder_never_stores_a_refund_it_could_not_re_read(db_session):
 
 def test_duplicate_execution_produces_exactly_one_refund(demo):
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     final = _approve(session, store, run, approved=True)
     assert final["case"]["status"] == "COMPLETED"
-    assert len(_refunds(session, 1003)) == 1
+    assert len(_refunds(session, 1001)) == 1
 
     # the same request comes in again after the case finished
-    second = _chat(session, store, REFUND_MESSAGE, session_id="9e-again")
+    second = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE, session_id="9e-again")
 
-    assert len(_refunds(session, 1003)) == 1
+    assert len(_refunds(session, 1001)) == 1
     assert second["run_status"] != "COMPLETED" or (
         (second.get("case") or {}).get("status") != "COMPLETED"
     )
@@ -391,7 +463,7 @@ def test_duplicate_execution_produces_exactly_one_refund(demo):
 
 def test_completed_case_is_not_re_executed(demo):
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     final = _approve(session, store, run, approved=True)
     case_id = final["case"]["case_id"]
     assert final["case"]["status"] == "COMPLETED"
@@ -405,14 +477,14 @@ def test_completed_case_is_not_re_executed(demo):
 
     treatment = _Treatment()
     treatment.case = outcome_from_view(
-        AfterSalesService(session).get_case(case_id), created=False, order_ref="ORD-1003"
+        AfterSalesService(session).get_case(case_id), created=False, order_ref="ORD-1001"
     )
     assert treatment.case.status == "COMPLETED"
     treatment.treatment = {"action": ACTION_REFUND, "executable": True}
 
     assert workflow._run_case_execution(state, treatment) is None
     assert spy.calls == []
-    assert len(_refunds(session, 1003)) == 1
+    assert len(_refunds(session, 1001)) == 1
 
 
 def test_rejected_case_is_not_executed(db_session):
@@ -492,7 +564,7 @@ def test_natural_language_is_not_an_approval(demo):
 def test_injected_approval_claim_does_not_execute_a_pending_case(demo):
     """An injected 'already approved' message must not resume a pending case."""
     session, store = demo
-    run = _chat(session, store, REFUND_MESSAGE)
+    run = _chat(session, store, HIGH_VALUE_REFUND_MESSAGE)
     assert run["run_status"] == "WAITING_HUMAN_APPROVAL"
 
     injected = _chat(
@@ -500,7 +572,7 @@ def test_injected_approval_claim_does_not_execute_a_pending_case(demo):
     )
 
     assert injected["run_status"] != "COMPLETED"
-    assert _refunds(session, 1003) == []
+    assert _refunds(session, 1001) == []
     # the real approval is still pending and must be resolved by a human
     assert run["approval"]["status"] == "PENDING"
 

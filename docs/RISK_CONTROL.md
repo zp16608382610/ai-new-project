@@ -22,8 +22,9 @@ Agent 能调用业务工具;工具能改变真实业务状态(取消订单、创
 | RiskLevel | RiskAction | 说明 | MVP 示例 |
 | --- | --- | --- | --- |
 | LOW | AUTO_EXECUTE | 只读/低影响,直接执行 | FAQ / 知识问答、订单查询、物流查询、退款资格查询 |
+| LOW | AUTO_EXECUTE | 标准、低风险且资格已确认的售后退款(`P-REFUND-LOW-RISK-AUTO`) | 质量问题 + 已签收 + 商品可退 + 无在途退款 + 金额 < 500 的售后退款 |
 | MEDIUM | USER_CONFIRM | 写操作,先问用户 | 取消订单 |
-| HIGH | HUMAN_APPROVAL | 涉及真实损失,人工审批 | 普通退款(金额 < 500) |
+| HIGH | HUMAN_APPROVAL | 涉及真实损失,人工审批 | 无法证明低风险的退款(例如资格未通过、商品不可退、有在途退款,或历史兼容的一次性退款流程) |
 | CRITICAL | HUMAN_APPROVAL | 损失高,人工审批 | 高金额退款(金额 ≥ 500) |
 | (未知操作) | BLOCK | fail-closed,绝不静默执行 | 未注册规则的操作 |
 
@@ -132,3 +133,31 @@ MVP 中两个写工具执行成功后会**重新查询权威业务状态**:
 - 触发点不同:9E 的 `create_refund` / `check_refund_eligibility` ToolRequest 由 `AgentWorkflow._run_case_execution` 构造,并携带 `case_id`,以便审批 Resume 时精确定位 Case;审批使用的仍是同一个 `ApprovalService` / `approval_requests`,**没有第二套审批**。
 - Verify 语义不变而且更严格:`AfterSalesExecutionService` 写 `COMPLETED` 之前会**再次**经 Repository 重新读取退款行;没有通过的 verification(`EXECUTION_NOT_VERIFIED`)或读不到退款行(`EXECUTION_REFUND_MISSING`)都会拒绝完成。
 - 风控规则、风险等级与策略**未做任何修改**;9E 没有新增风险等级,也没有允许 LLM 决定金额或绕过审批。`EXCHANGE` / `REPAIR` 没有可执行的业务系统,记录 `NOT_IMPLEMENTED` / `HUMAN_HANDOFF` 转人工,不伪造成功。
+
+## Phase 9F 补充:低风险标准退款可以自动执行(Decision 049)
+
+Phase 9F 之前,退款(`REFUND_REQUEST` / `CREATE_REFUND`)一律是 `HIGH / HUMAN_APPROVAL`。9F 为「已经过完整售后链路、业务资格已确认、金额很小的标准质量问题退款」增加了一条**唯一**的自动执行路径:
+
+- 策略 id:`P-REFUND-LOW-RISK-AUTO`(定义在 `backend/app/risk/policy.py`);
+- 命中结果:`RiskLevel.LOW` + `RiskAction.AUTO_EXECUTE`;
+- 未命中:回落到原有 `HIGH / HUMAN_APPROVAL`;金额 ≥ 500 仍是 `CRITICAL / HUMAN_APPROVAL`。
+
+自动执行的**全部**条件(缺一即不自动执行):
+
+| 条件 | 权威来源 |
+| --- | --- |
+| `eligibility_passed is True` | 确定性 Eligibility Engine(不绕过) |
+| `requested_action == "REFUND"` 且 `case_type == "QUALITY_ISSUE"` | 持久化的 AfterSalesCase |
+| `order_status == "DELIVERED"` 且 `order_id is not None` | Business System(OrderService) |
+| `active_refund_count == 0` | Business System |
+| `items_returnable is True`(False / **None 都不放行**) | Business System |
+| `refund_amount` 存在且 `< 500` | RefundService(订单总价) |
+
+边界说明(仍是 demo 的业务策略,不是生产级金融风控):
+
+- **自动执行 ≠ 绕过风控**:`AUTO_EXECUTE` 只是 Risk Gate 的一种决策结果,之后仍然走同一个 ToolExecutor → RefundService → Repository;
+- **金额不由 LLM / 用户决定**:金额从不进入 ToolRequest 参数,由 RefundService 依据订单总价推导(用户说「退款 5000 元」也只能得到权威金额);
+- **unknown 视为不能证明低风险**:`eligibility_passed=None`、`items_returnable=None`、`order_status=None`、`active_refund_count=None`、`refund_amount=None` 一律不自动执行;
+- **售后时效窗口仍由 Eligibility Engine 判定**:风险层只接收结论,不重复推导时效(`days_since_delivery` 仅用于可观测性);
+- **自动路径仍必须 Verify**:`BusinessVerifier` 重新读取权威退款行;Verify 失败不得 `COMPLETED`,Case 保持 / 回到 `PENDING_HUMAN`;
+- **历史兼容流程不受影响**:没有 Case 事实的一次性 `REFUND_TOOL` 退款上下文里所有字段都是 `None`,因此仍然是 `HIGH / HUMAN_APPROVAL`。
