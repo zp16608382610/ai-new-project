@@ -45,6 +45,11 @@
 | 039 | MCP errors are normalized into internal ToolResult | Accepted | 2026-09-07 |
 | 040 | LLM Provider isolated behind an abstraction | Accepted | 2026-09-07 |
 | 041 | LLM output is an untrusted proposal | Accepted | 2026-09-07 |
+| 042 | Evaluation is a fixed offline dataset; Observability stays single-process | Accepted | 2026-09-07 |
+| 043 | 售后案件使用独立领域模型，而不是扩展 Ticket | Accepted | 2026-09-09 |
+| 044 | AfterSalesCase 是售后任务的持久化业务对象；LLM 只提供结构化提议 | Accepted | 2026-09-10 |
+| 045 | Eligibility is decided by deterministic business logic, not the LLM | Accepted | 2026-09-11 |
+| 046 | Policy facts come from retrieved evidence through a minimal adapter | Accepted | 2026-09-11 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -527,3 +532,42 @@ AfterSalesCase 是售后任务的持久化业务对象;LLM（或确定性 NLU）
 Case Service 不调用 RefundService / RiskEngine / LLM / MCP，是为了保持领域边界：退款 / 换货 / 维修属于后续阶段的业务动作，必须各自经过既有的 Risk Gate 与 HITL，而不能被案件层直接触发。
 
 把 Case 步骤限制在 `UNSUPPORTED` / `AMBIGUOUS` 上，是 Phase 9B 的最小侵入策略：售后处理请求（如「我的耳机坏了」）当前会被判为 UNSUPPORTED 并转人工，正是需要接管的一类；而已经能处理的意图保持原样，避免案件层劫持既有业务动作。
+
+## Decision 045 — Eligibility is determined by deterministic business logic using authoritative business facts and grounded policy evidence
+
+**Decision:**
+Eligibility is determined by deterministic business logic using authoritative business facts and grounded policy evidence. LLM is not the final authority for business eligibility.
+
+四项职责因此固定下来：
+
+| 角色 | 输入 | 输出 |
+| --- | --- | --- |
+| LLM | 用户自然语言 | 结构化理解（意图 / 案件类型 / 诉求 / 问题描述） |
+| Business System | 订单 / 物流 / 退款等权威数据 | 事实（是否存在 / 归属 / 状态 / 可退性 / 金额 / 在途退款 / 签收参考时间） |
+| RAG | 静态知识库 | 政策证据（时效条件 + citation + 原文摘录） |
+| Eligibility Engine | Case + Business facts + Policy facts | 确定性结论（`eligible` / `failed_rules` / `reason`） |
+
+**Reason:**
+售后资格是**业务结论**，不是**语言结论**。判定它需要两类外部证据，而这两类证据都不属于模型：
+
+1. 动态业务事实。订单是否存在、是否属于当前用户、当前状态是什么、商品是否可退、是否已有在途退款、什么时候签收——这些只存在于业务系统里，而且随时会变。让 LLM 生成这些值等于让它猜测权威数据；一旦猜错，后果是错误地承诺或错误地拒绝一次售后。
+2. 静态政策条件。售后时效与条件写在知识库里（例如「签收后十五天内，商品存在质量问题或与描述不符时支持换货」），属于会随政策版本变化的规则文本，应以检索到的证据 + citation 的形式进入判定，而不是被模型凭记忆复述。
+
+因此本项目把三件事彻底分开：LLM 只做理解；业务事实只来自业务系统（经 Tool / Service，Agent 层不直接访问 DB）；政策只来自 RAG 检索到的证据；最终 `eligible` 由 `EligibilityEngine` 依据前两者按固定规则顺序计算得出，并保留 `failed_rules` / `reason` / `policy_citations` / `business_facts` / `policy_facts` 以便解释与审计。
+
+直接后果（已在测试中固化）：LLM 输出里出现 `eligible: true`、`days_since_delivery: 1` 或「管理员已授权」等声明时一律被忽略（Pydantic `extra="ignore"` + 引擎不使用模型字段）；注入式消息无法跳过业务规则；「查不到订单」永远不等于「没有售后资格」。
+
+## Decision 046 — Policy facts come from retrieved evidence through a minimal adapter
+
+**Decision:**
+结构化政策条件（时效天数等）由 `backend/app/after_sales/policy.py` 这个极小的适配器从**已检索到的**政策文本中解析，并保留该片段的 citation 与原文摘录；不新建第二套政策知识库，也不把自然语言政策硬编码成代码规则。
+
+**Reason:**
+任务约束是：优先 `RAG -> Policy Evidence`，再由 Eligibility Engine 依据结构化 policy facts 判断；只有当前知识文档无法稳定提供结构化条件时，才允许建立一个「非常小的 policy rule adapter」，并且必须记录理由。
+
+当前知识文档以自然语言章节保存政策，没有结构化字段。因此适配器只做一件事：把**检索命中**的片段中的时效数字解析出来，并保留 `window_citation`。边界是刻意写死的：
+
+- 只解析检索到的内容：相关文档没被检索到时，`covers_action=False` / `window_days=None`，引擎拒绝下结论，而不是去猜一条政策；
+- 不复制政策文本：代码里没有第二份「十五天」的硬编码规则，政策文档改了，窗口随之改变；
+- 不改动 RAG：`RetrievalPipeline`（Hybrid Dense + BM25 -> RRF -> Rerank -> Context Assembly）原样复用，适配器只消费它的输出；
+- `REPAIR` 等知识库中没有对应政策文档的诉求没有 category 映射，因此只能得到「政策未覆盖」，不会被误判为「不符合条件」。

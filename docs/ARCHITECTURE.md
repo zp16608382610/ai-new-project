@@ -530,3 +530,47 @@ POST /api/v1/demo/chat
 - **编排边界**:`AfterSalesCaseManager` 只依赖 `AfterSalesService`;不调用 RefundService / RiskEngine / LLM / MCP,不执行任何写业务动作。Case Service 异常在 workflow 内被捕获并降级到确定性路径(聊天不中断、不返回 500)。
 - **Session 关联**:不新增数据库字段。demo 层用 `DemoRunStore` 中同一 session 最近一次带 case 的 run 作为 session -> case 的最小链接(进程内);复用前重新校验案件存在 / 归属用户 / 状态可继续(仅 `INFORMATION_COLLECTION` / `ELIGIBILITY_CHECK`)。
 - **展示层**:`build_run_payload` 增加 `case` 字段与 `Case Upsert` / `Information Collection` 时间线步骤;`build_text` 按 `missing_information` 生成确定性的追问或下一步说明,不经过 LLM,也不声称任何未执行的动作。
+
+## 26. After-Sales Investigation + Eligibility（Phase 9C 落地）
+
+### 26.1 四类职责（Grounding Boundary）
+
+| 角色 | 负责 | 不负责 |
+| --- | --- | --- |
+| LLM | 自然语言理解（案件类型 / 诉求 / 问题描述） | 业务事实、政策结论、`eligible` |
+| Business Tool / Service | 权威业务事实（订单是否存在 / 归属 / 状态 / 商品可退性 / 金额 / 在途退款 / 签收参考时间） | 政策解释与资格结论 |
+| RAG（既有 Hybrid Retrieval） | 政策证据 + citation + 原文摘录 | 业务事实与最终资格结论 |
+| Eligibility Engine（确定性） | 最终资格结论 + failed rules + reason | 金额计算与退款 / 换货执行 |
+
+### 26.2 调用链
+
+```
+workflow  Understand -> Case Upsert -> CASE_INVESTIGATION -> Finalize
+                    (only when the case reached ELIGIBILITY_CHECK)
+
+service   AfterSalesInvestigationService.investigate(case)
+            |- Order Investigation  -> OrderRepository / LogisticsRepository /
+            |                          RefundRepository -> BusinessFacts
+            |- Policy Investigation -> RetrievalPipeline.run(query) -> PolicyFacts
+            '- EligibilityEngine.evaluate(case, business, policy) -> EligibilityResult
+          -> AfterSalesService.update_case(status / collected_information / ai_summary)
+```
+
+分层边界：`app/agent/` 只依赖注入的 `CaseInvestigatorLike` Protocol（不 import SQLAlchemy / Repository / Service；`tests/test_after_sales_eligibility.py` 含源码级架构守卫）；`app/after_sales/` 是纯领域层（无 DB、无 LLM）；数据库访问集中在 `app/services/after_sales_investigation.py`。
+
+### 26.3 规则、状态与业务红线
+
+- 规则顺序固定（`EligibilityEngine.rules`）：`order_available` -> `order_owned_by_user` -> `policy_evidence` -> `policy_covers_action` -> `order_status_delivered` / `no_active_refund` / `items_returnable` -> `after_sales_window` -> `exchange_branch`。
+- `eligible` 三态：`True` -> `PROCESSING`；`False` -> `REJECTED`；`None` -> `INFORMATION_COLLECTION`（缺权威信息）或保持 `ELIGIBILITY_CHECK`（政策未覆盖 / 缺时效信息，`requires_human_review=True`）。
+- 业务红线：订单不存在 / 订单不属于当前用户 / 缺少订单号属于**调查失败或信息问题**，永远返回 `eligible=None` + `missing_information`，而不是 `eligible=False`。
+- 签收参考时间：`orders` 表没有 `delivered_at`。规则为 DELIVERED 物流记录优先，否则使用 DELIVERED 订单的 `updated_at`，并把取值来源写入 `business_facts.delivery_reference_source`（不推测、不臆造）。
+- 时效窗口：由检索到的政策文本解析（如「签收后十五天内」-> 15 天）并保留 `window_citation`；测试与 Evaluation 通过注入 `reference_time` 固定窗口，避免结果随真实时间漂移（线上 demo 使用真实时钟）。
+- 金额：资格判定不计算金额。退款金额仍由业务系统（RefundService）在真正执行时给出。
+
+### 26.4 Demo 与 Observability
+
+`/api/v1/demo/chat` payload 新增 `eligibility` / `investigation`；timeline 复用既有机制，新增 `Order Investigation` / `Policy Retrieval` / `Eligibility Check` 步骤（不在前端新增第二套 trace）。`/chat` 可看到 Case ID / 案件状态 / 订单调查 / 政策依据 / 资格结果；不暴露任何内部敏感信息。前端无需改动。
+
+### 26.5 明确未实现
+
+退款 / 换货 / 维修的**执行**、售后金额计算、人工审批流的扩大、真实 Embedding / pgvector 的语义政策检索、规模化评测与生产级可观测性仍属后续 Phase（9D 及以后 / Phase 8）。

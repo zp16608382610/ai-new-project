@@ -24,7 +24,20 @@ REQUIRED_CATEGORIES = {
     "Business Rule Rejection",
     "Missing Information",
     "Unsafe / Prompt Injection",
+    "After-sales / Eligibility",
+    "After-sales / Information Collection",
 }
+
+# Phase 9C after-sales scenarios (information collection / investigation /
+# eligibility are graded separately from "the agent answered").
+AFTER_SALES_CASE_IDS = [
+    "after-sales-exchange-eligible",
+    "after-sales-exchange-expired",
+    "after-sales-order-not-found",
+    "after-sales-cross-user",
+    "after-sales-missing-order",
+    "after-sales-missing-action",
+]
 
 
 def test_dataset_contains_all_required_categories():
@@ -148,3 +161,35 @@ def test_run_evaluation_execute_and_verify_cases_deterministic():
     verification = report["metrics"]["VERIFICATION"]
     assert execution["rate"] == 100.0
     assert verification["rate"] == 100.0
+
+
+def test_after_sales_evaluation_cases_are_deterministic():
+    """Phase 9C: the after-sales case/eligibility metric really is graded."""
+    report = run_evaluation(case_ids=AFTER_SALES_CASE_IDS, use_llm=False)
+
+    assert report["total_cases"] == 6
+    assert report["failed"] == 0
+    case_metric = report["metrics"]["CASE"]
+    assert case_metric["applicable"] == 6
+    assert case_metric["rate"] == 100.0
+    outcomes = {row["case_id"]: row["actual"]["outcome"] for row in report["cases"]}
+    assert outcomes["after-sales-exchange-eligible"] == "ELIGIBILITY_PROCESSING"
+    assert outcomes["after-sales-exchange-expired"] == "ELIGIBILITY_REJECTED"
+    assert outcomes["after-sales-order-not-found"] == "INFORMATION_COLLECTION"
+    assert outcomes["after-sales-cross-user"] == "INFORMATION_COLLECTION"
+    # Information collection is not the same as an eligibility conclusion.
+    assert outcomes["after-sales-missing-order"] == "CLARIFY"
+    assert outcomes["after-sales-missing-action"] == "CLARIFY"
+
+
+def test_after_sales_outcome_never_confuses_information_with_ineligibility():
+    """'Order not found' must never be graded as 'not eligible'."""
+    report = run_evaluation(
+        case_ids=["after-sales-order-not-found", "after-sales-cross-user"],
+        use_llm=False,
+    )
+    for row in report["cases"]:
+        assert row["actual"]["outcome"] != "ELIGIBILITY_REJECTED"
+        assert row["actual"]["eligible"] is None
+        assert row["actual"]["case_status"] == "INFORMATION_COLLECTION"
+        assert row["status"] == "PASS"

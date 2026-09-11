@@ -7,6 +7,14 @@ expectation is None is reported as N/A (not as a failure).
 Outcome vocabulary used by expected_outcome:
     ANSWERED / USER_CONFIRMATION / HUMAN_APPROVAL / CLARIFY /
     ACCESS_DENIED / RULE_REJECTED / ERROR
+
+Phase 9C adds the after-sales outcomes, which keep "成功回答" and "成功完成售后"
+apart:
+    INFORMATION_COLLECTION  investigated, but authoritative information is missing
+                            (e.g. the order does not exist) -> ask the user
+    INVESTIGATION           investigated, but no conclusion could be reached
+    ELIGIBILITY_PROCESSING  determined eligible -> the case may continue
+    ELIGIBILITY_REJECTED    deterministically not eligible
 """
 from __future__ import annotations
 
@@ -35,6 +43,11 @@ class EvaluationCase:
     expected_requires_approval: bool | None = None
     expected_execution_success: bool | None = None
     expected_verification_success: bool | None = None
+    # --- Phase 9C after-sales case expectations (None => metric is N/A) ---
+    reference_time: str | None = None  # ISO timestamp pinning the policy window
+    expected_case_status: str | None = None
+    expected_eligible: bool | None = None
+    expected_failed_rules: tuple[str, ...] | None = None
     note: str = ""
 
 
@@ -216,6 +229,93 @@ EVALUATION_DATASET: tuple[EvaluationCase, ...] = (
         expected_verification_success=None,
         expected_outcome="HUMAN_APPROVAL",
         note="A user instruction can never disable the deterministic risk gate (ORD-1001 is a high-value refund -> CRITICAL).",
+    ),
+    EvaluationCase(
+        case_id="after-sales-exchange-eligible",
+        category="After-sales / Eligibility",
+        scenario="\u5546\u54c1\u8d28\u91cf\u95ee\u9898 + \u6362\u8d27, \u5728\u653f\u7b56\u65f6\u6548\u5185 -> eligible.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PROCESSING",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_PROCESSING",
+        note="Deterministic eligibility: DELIVERED + QUALITY_ISSUE + 2 days <= 15-day policy window (RAG).",
+    ),
+    EvaluationCase(
+        case_id="after-sales-exchange-expired",
+        category="After-sales / Eligibility",
+        scenario="\u5546\u54c1\u8d28\u91cf\u95ee\u9898 + \u6362\u8d27, \u8d85\u51fa\u653f\u7b56\u65f6\u6548 -> rejected.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-10-01T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="REJECTED",
+        expected_eligible=False,
+        expected_failed_rules=("after_sales_window",),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_REJECTED",
+        note="39 days > 15-day window -> deterministic REJECTED, with the policy citation kept.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-order-not-found",
+        category="After-sales / Eligibility",
+        scenario="\u8ba2\u5355\u4e0d\u5b58\u5728 -> \u4fe1\u606f\u95ee\u9898, \u4e0d\u80fd\u5224\u5b9a\u4e3a\u6ca1\u6709\u552e\u540e\u8d44\u683c.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1004\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1004",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_failed_rules=("order_available",),
+        expected_requires_approval=False,
+        expected_outcome="INFORMATION_COLLECTION",
+        note="'Order not found' is an information problem: eligible must stay None, never False.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-cross-user",
+        category="After-sales / Eligibility",
+        scenario="\u8ba2\u5355\u5c5e\u4e8e\u5176\u4ed6\u7528\u6237 -> \u4e0d\u505a\u8d44\u683c\u5224\u5b9a.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-2001\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-2001",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_failed_rules=("order_available",),
+        expected_requires_approval=False,
+        expected_outcome="INFORMATION_COLLECTION",
+        note="ORD-2001 belongs to Bob; the deterministic engine refuses to conclude for Alice.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-missing-order",
+        category="After-sales / Information Collection",
+        scenario="\u7f3a\u5c11\u8ba2\u5355\u53f7 -> \u53ea\u6536\u96c6\u4fe1\u606f, \u4e0d\u731c.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u5e2e\u6211\u5904\u7406\u4e00\u4e0b\u3002",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_requires_approval=False,
+        expected_outcome="CLARIFY",
+        note="Information collection only: no investigation runs and nothing is concluded.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-missing-action",
+        category="After-sales / Information Collection",
+        scenario="\u7f3a\u5c11\u552e\u540e\u8bc9\u6c42 -> \u53ea\u6536\u96c6\u4fe1\u606f, \u4e0d\u731c.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\u3002",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="INFORMATION_COLLECTION",
+        expected_requires_approval=False,
+        expected_outcome="CLARIFY",
+        note="Missing requested_action -> still information collection, never a conclusion.",
     ),
 )
 

@@ -197,6 +197,13 @@ def _evaluation_case_summary(case) -> dict[str, Any]:
             "execution_success": case.expected_execution_success,
             "verification_success": case.expected_verification_success,
             "outcome": case.expected_outcome,
+            "case_status": case.expected_case_status,
+            "eligible": case.expected_eligible,
+            "failed_rules": (
+                list(case.expected_failed_rules)
+                if case.expected_failed_rules is not None
+                else None
+            ),
         },
     }
 

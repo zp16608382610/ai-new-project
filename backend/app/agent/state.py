@@ -73,6 +73,8 @@ class WorkflowStage(str, enum.Enum):
     CLASSIFY_INTENT = "CLASSIFY_INTENT"
     # Phase 9B: after-sales case upsert + information collection.
     CASE_MANAGEMENT = "CASE_MANAGEMENT"
+    # Phase 9C: order + policy investigation feeding the eligibility engine.
+    CASE_INVESTIGATION = "CASE_INVESTIGATION"
     ROUTE = "ROUTE"
     RAG = "RAG"
     BUSINESS_TOOL_REQUEST = "BUSINESS_TOOL_REQUEST"
@@ -186,6 +188,11 @@ class AgentResult:
     # Phase 9B: structured after-sales case (created or updated) when this run
     # was handled by the case-management branch. None for every other route.
     after_sales_case: JsonDict | None = None
+    # Phase 9C: deterministic eligibility result (serialized EligibilityResult)
+    # and the order/policy evidence it was derived from. None unless the
+    # investigation branch really ran.
+    after_sales_eligibility: JsonDict | None = None
+    after_sales_investigation: JsonDict | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -203,6 +210,16 @@ class AgentResult:
             "after_sales_case": dict(self.after_sales_case)
             if self.after_sales_case is not None
             else None,
+            "after_sales_eligibility": (
+                dict(self.after_sales_eligibility)
+                if self.after_sales_eligibility is not None
+                else None
+            ),
+            "after_sales_investigation": (
+                dict(self.after_sales_investigation)
+                if self.after_sales_investigation is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -224,6 +241,16 @@ class AgentResult:
             after_sales_case=(
                 dict(data["after_sales_case"])
                 if isinstance(data.get("after_sales_case"), dict)
+                else None
+            ),
+            after_sales_eligibility=(
+                dict(data["after_sales_eligibility"])
+                if isinstance(data.get("after_sales_eligibility"), dict)
+                else None
+            ),
+            after_sales_investigation=(
+                dict(data["after_sales_investigation"])
+                if isinstance(data.get("after_sales_investigation"), dict)
                 else None
             ),
         )
@@ -255,6 +282,10 @@ class AgentState:
     risk_decisions: tuple[dict[str, Any], ...] = ()
     # Phase 9B: the after-sales case this request created or updated.
     after_sales_case: JsonDict | None = None
+    # Phase 9C: deterministic eligibility conclusion + the order/policy evidence
+    # behind it (observability, same shape the demo payload exposes).
+    after_sales_eligibility: JsonDict | None = None
+    after_sales_investigation: JsonDict | None = None
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
@@ -291,6 +322,16 @@ class AgentState:
             "after_sales_case": dict(self.after_sales_case)
             if self.after_sales_case is not None
             else None,
+            "after_sales_eligibility": (
+                dict(self.after_sales_eligibility)
+                if self.after_sales_eligibility is not None
+                else None
+            ),
+            "after_sales_investigation": (
+                dict(self.after_sales_investigation)
+                if self.after_sales_investigation is not None
+                else None
+            ),
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
@@ -327,6 +368,12 @@ class AgentState:
         case_data = data.get("after_sales_case")
         if isinstance(case_data, dict):
             state.after_sales_case = dict(case_data)
+        eligibility_data = data.get("after_sales_eligibility")
+        if isinstance(eligibility_data, dict):
+            state.after_sales_eligibility = dict(eligibility_data)
+        investigation_data = data.get("after_sales_investigation")
+        if isinstance(investigation_data, dict):
+            state.after_sales_investigation = dict(investigation_data)
         # retrieved_context is a runtime-only structured object; serialization
         # keeps a summary (see to_dict). Deserialization intentionally restores
         # the serializable contract with retrieved_context=None.

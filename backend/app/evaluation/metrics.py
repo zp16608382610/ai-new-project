@@ -5,7 +5,9 @@ Pure functions that turn one dataset case + the REAL run payload(s) into:
     - per-metric pass / fail / N/A checks
     - normalized actual fields (intent, entities, route, risk, approval,
       execution, verification, outcome)
-    - a whole-report summary with the seven headline metrics
+    - a whole-report summary with the headline metrics (Phase 9C adds CASE:
+      after-sales case state + deterministic eligibility, kept separate from
+      "the agent answered successfully")
 
 No magic numbers and no fabricated scores: a metric is only counted when the
 case carries an explicit expectation (otherwise it is N/A).
@@ -27,6 +29,7 @@ METRICS = (
     "APPROVAL",
     "EXECUTION",
     "VERIFICATION",
+    "CASE",
 )
 
 # The write/read operation each business route is expected to reach.
@@ -89,6 +92,18 @@ def actual_outcome(payload: JsonDict) -> str:
     """Classify the run payload into the normalized outcome vocabulary."""
     run_status = payload.get("run_status") or ""
     agent_status = payload.get("agent_status") or ""
+    case = payload.get("case")
+    eligibility = payload.get("eligibility")
+    if isinstance(eligibility, dict) and eligibility:
+        # Phase 9C: the after-sales conclusion is its own outcome. A successful
+        # answer is NOT the same as a completed after-sales case.
+        if eligibility.get("eligible") is True:
+            return "ELIGIBILITY_PROCESSING"
+        if eligibility.get("eligible") is False:
+            return "ELIGIBILITY_REJECTED"
+        if isinstance(case, dict) and case.get("status") == "INFORMATION_COLLECTION":
+            return "INFORMATION_COLLECTION"
+        return "INVESTIGATION"
     if run_status == "WAITING_USER_CONFIRMATION":
         return "USER_CONFIRMATION"
     if run_status == "WAITING_HUMAN_APPROVAL":
@@ -154,6 +169,8 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
     approval_resolution = payload.get("approval_resolution")
     execution = actual_execution(payload, case)
     verification = actual_verification(payload)
+    case_view = payload.get("case")
+    eligibility = payload.get("eligibility")
     return {
         "intent": payload.get("intent"),
         "route": payload.get("route"),
@@ -169,6 +186,18 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
         "outcome": actual_outcome(payload),
         "run_status": payload.get("run_status"),
         "agent_status": payload.get("agent_status"),
+        # Phase 9C: after-sales case state + deterministic eligibility result.
+        "case_status": (
+            case_view.get("status") if isinstance(case_view, dict) else None
+        ),
+        "eligible": (
+            eligibility.get("eligible") if isinstance(eligibility, dict) else None
+        ),
+        "failed_rules": (
+            list(eligibility.get("failed_rules") or [])
+            if isinstance(eligibility, dict)
+            else None
+        ),
     }
 
 
@@ -252,6 +281,28 @@ def evaluate_case(
             "actual": done["verification_success"],
         })
     # OUTCOME (part of the overall pass/fail, reported separately)
+    # CASE (Phase 9C): after-sales case state + deterministic eligibility.
+    if case.expected_case_status is None:
+        checks.append({
+            "metric": "CASE", "expected": None, "passed": None,
+            "actual": done["case_status"],
+        })
+    else:
+        case_ok = done["case_status"] == case.expected_case_status
+        if case.expected_eligible is not None:
+            case_ok = case_ok and done["eligible"] == case.expected_eligible
+        if case.expected_failed_rules is not None:
+            case_ok = case_ok and (
+                list(done["failed_rules"] or []) == list(case.expected_failed_rules)
+            )
+        checks.append({
+            "metric": "CASE", "expected": case.expected_case_status,
+            "passed": case_ok,
+            "actual": (
+                f"{done['case_status']} eligible={done['eligible']} "
+                f"failed_rules={done['failed_rules']}"
+            ),
+        })
     checks.append({
         "metric": "OUTCOME", "expected": case.expected_outcome,
         "passed": done["outcome"] == case.expected_outcome, "actual": done["outcome"],
@@ -289,7 +340,7 @@ def evaluate_case(
 
 
 def summarize(case_results: list[JsonDict]) -> JsonDict:
-    """Aggregate pass/fail/N/A counts and the seven headline metrics."""
+    """Aggregate pass/fail/N/A counts and the headline metrics."""
     metric_buckets: dict[str, list[JsonDict]] = {name: [] for name in METRICS}
     for case_result in case_results:
         for check in case_result["checks"]:
@@ -311,6 +362,7 @@ def summarize(case_results: list[JsonDict]) -> JsonDict:
                 "APPROVAL": "Approval Decision Accuracy",
                 "EXECUTION": "Execution Success",
                 "VERIFICATION": "Verification Success",
+                "CASE": "After-sales Case / Eligibility",
             }[metric],
             "passed": passed,
             "applicable": len(applicable),

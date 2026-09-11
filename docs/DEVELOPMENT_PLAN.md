@@ -25,7 +25,8 @@
 - **Phase 8 — Evaluation + Observability(规模化 / 生产级):not started**
 - **Phase 9A — After-Sales Domain Model:completed**(售后案件领域模型,不接入 Agent)
 - **Phase 9B — After-Sales Case Agent Integration:completed**(Agent 识别售后处理请求并创建 / 更新 Case,完成基础信息收集;不执行退款 / 换货 / 维修)
-- **Phase 9C 及以后 — 售后资格校验 / 执行:not started**
+- **Phase 9C — After-Sales Investigation + Eligibility:completed**(ELIGIBILITY_CHECK 案件自动完成 Order / Policy 调查并由确定性 Eligibility Engine 给出资格判定;不执行退款 / 换货 / 维修)
+- **Phase 9D 及以后 — 售后执行(退款 / 换货 / 维修)、真实 Embedding / pgvector 与规模化评测:not started**
 - **Phase 9 — Final Demo(现场彩排 / 验收 / 收尾):not started**
 
 ## Phase 1 — Foundation [COMPLETED]
@@ -258,3 +259,24 @@
 - **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 044、ARCHITECTURE.md §25。
 
 说明：Phase 9B 只做案件管理，不进入 Phase 9C；`AfterSalesCase` 目前仍不触发任何退款 / 换货 / 维修执行。
+
+
+## Phase 9C — After-Sales Investigation + Eligibility [COMPLETED]
+
+
+已完成 Phase 9C：让处于 `ELIGIBILITY_CHECK` 的 AfterSalesCase 自动完成售后调查（Order Investigation + Policy Investigation → Eligibility Engine），得到结构化资格判断并推进案件状态。本阶段只做「调查 + 资格判定」，不执行退款 / 换货 / 维修，不修改 RefundService / CancelOrder / Risk Gate / HITL / Execute / Verify。
+
+- **新增调用链**：`Understand → Case Upsert → Order Investigation → Policy Retrieval → Eligibility Check → Finalize`。只有信息完整的案件（ELIGIBILITY_CHECK）会进入调查；INFORMATION_COLLECTION 仍只收集信息。
+- **四类职责严格分离**（Decision 045）：LLM 只做自然语言理解；Business Tool / Service 提供权威业务事实；RAG 提供政策证据；`EligibilityEngine`（`backend/app/after_sales/eligibility.py`，纯领域、无 SQLAlchemy / 无 LLM）给出最终资格结论。
+- **Order Investigation**：`backend/app/services/after_sales_investigation.py` 经 Repository → OrderService 语义读取订单，并附 `LogisticsRepository.get_latest_by_order()` 与 `RefundRepository.list_active_by_order()`；Agent 层不直接访问数据库（只依赖注入的 `CaseInvestigatorLike` Protocol，测试含源码级架构守卫）。订单模型当前没有 `delivered_at`，签收参考按确定性规则取值并记录来源（DELIVERED 物流记录优先，否则 DELIVERED 订单的 `updated_at`）。
+- **Policy Investigation**：复用既有 Hybrid Retrieval → Rerank → Context Assembly（`RetrievalPipeline.run(query)`），query 由 `build_policy_query(case_type, requested_action)` 生成（如「商品质量问题 换货 售后政策」）；`app/after_sales/policy.py` 只把「检索到的」政策片段解析成结构化 `PolicyFacts`（时效天数 + citation + 原文摘录），检索不到就不解析、不臆造（Decision 046）。
+- **Eligibility 结果**：`EligibilityResult` 的 `eligible` 为三态（True 符合 / False 不符合 / None 无法判定），并含 `status` / `reason` / `failed_rules` / `missing_information` / `policy_citations` / `business_facts` / `policy_facts` / `investigation` / `requires_human_review`，全部可序列化。规则 id：`order_available` / `order_owned_by_user` / `policy_evidence` / `policy_covers_action` / `order_status_delivered` / `no_active_refund` / `items_returnable` / `after_sales_window` / `exchange_branch`。
+- **业务语义红线**：「查不到订单」不是「没有售后资格」。订单不存在 / 归属不匹配 / 缺少订单号 → `eligible=None` + `INFORMATION_COLLECTION`（`missing_information` 增加 `order_id`），绝不返回 `eligible=False`。
+- **案件状态推进**：符合 → `PROCESSING`；不符合 → `REJECTED`（保存 `ai_summary` / 政策证据 / failed rules）；信息不足 → `INFORMATION_COLLECTION`；政策未覆盖或缺少时效信息 → 保持 `ELIGIBILITY_CHECK` 并标记 `requires_human_review`（本阶段不自行扩大人工审批逻辑）。`collected_information.eligibility` 保存完整判定结果。
+- **Agent 契约**：新增 `WorkflowStage.CASE_INVESTIGATION`；`AgentState` / `AgentResult` 新增 `after_sales_eligibility` / `after_sales_investigation`。调查异常只记日志并保留 ELIGIBILITY_CHECK，不破坏聊天流程。
+- **Observability**：复用既有 demo timeline（不新增第二套 trace），新增 `Order Investigation` / `Policy Retrieval` / `Eligibility Check` 步骤；payload 新增 `eligibility` / `investigation`，`/chat` 可看到 Case ID / 案件状态 / 订单调查 / 政策依据 / 资格结果。
+- **Evaluation**：新增 6 个固定 case（合法换货 / 超窗口 / 订单不存在 / 用户不匹配 / 缺订单号 / 缺诉求）与 `CASE` 指标（案件状态 + eligible + failed_rules）；新增 outcome 词表 `ELIGIBILITY_PROCESSING` / `ELIGIBILITY_REJECTED` / `INFORMATION_COLLECTION` / `INVESTIGATION`，把「回答成功」与「完成售后」分开。评测 case 可注入 `reference_time` 固定售后时效窗口，避免指标随真实时间漂移。
+- **测试**：新增 `tests/test_after_sales_eligibility.py`（32 例）；`tests/test_demo_api.py` 新增 1 例真实 HTTP 链路并按 9C 语义更新 1 例（原断言基于「案件停在 ELIGIBILITY_CHECK 且不调查」的 9B 前提，已被本阶段明确取代）；`tests/test_evaluation.py` 新增 2 例。全量 **480 例**通过（445 → 480，无既有测试回归），backend `compileall` 通过，未新增第三方依赖。
+- **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 045 / 046、ARCHITECTURE.md §26。
+
+说明：Phase 9C 只做调查与资格判定，不进入 Phase 9D；`AfterSalesCase` 仍不触发任何退款 / 换货 / 维修执行。

@@ -84,6 +84,8 @@ def run_evaluation(
 
 def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]:
     """Run one case end-to-end; never fabricate a result on failure."""
+    # Phase 9C: the after-sales window must be reproducible, so a case can pin
+    # the reference time instead of depending on the wall clock.
     from app.demo.service import finalize_approval, run_chat
     from app.demo.store import DemoRunStore
 
@@ -101,6 +103,7 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
             session_id=session_id,
             user_confirmed=case.user_confirmed,
             use_llm=use_llm,
+            investigation_reference_time=_reference_time(case),
         )
         final_payload = initial_payload
         approval = initial_payload.get("approval")
@@ -132,6 +135,13 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
                 "execution_success": case.expected_execution_success,
                 "verification_success": case.expected_verification_success,
                 "outcome": case.expected_outcome,
+                "case_status": case.expected_case_status,
+                "eligible": case.expected_eligible,
+                "failed_rules": (
+                    list(case.expected_failed_rules)
+                    if case.expected_failed_rules is not None
+                    else None
+                ),
             },
             "actual": {
                 "intent": None,
@@ -145,6 +155,9 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
                 "outcome": "ERROR",
                 "run_status": None,
                 "agent_status": None,
+                "case_status": None,
+                "eligible": None,
+                "failed_rules": None,
             },
             "status": "FAIL",
             "failure_reasons": [f"RUN_ERROR: {error}"],
@@ -152,3 +165,10 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
         }
 
     return evaluate_case(case, initial_payload or {}, final_payload or {})
+
+
+def _reference_time(case: EvaluationCase) -> datetime | None:
+    """Parse a case's pinned reference time (None => the real clock)."""
+    if not case.reference_time:
+        return None
+    return datetime.fromisoformat(case.reference_time)

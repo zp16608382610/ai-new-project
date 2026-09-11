@@ -42,6 +42,8 @@ ACTION_UNKNOWN = "UNKNOWN"
 
 STATUS_INFORMATION_COLLECTION = "INFORMATION_COLLECTION"
 STATUS_ELIGIBILITY_CHECK = "ELIGIBILITY_CHECK"
+STATUS_PROCESSING = "PROCESSING"
+STATUS_REJECTED = "REJECTED"
 
 MISSING_ORDER_ID = "order_id"
 MISSING_REQUESTED_ACTION = "requested_action"
@@ -290,3 +292,57 @@ class DeterministicAfterSalesCaseDetector:
             if cleaned and any(marker in cleaned for marker in _PROBLEM_MARKERS):
                 return cleaned
         return None
+
+
+@dataclass(frozen=True)
+class AfterSalesInvestigationOutcome:
+    """Result of investigating one ELIGIBILITY_CHECK case (Phase 9C).
+
+    Pure, serializable data produced by the service layer:
+
+        case           the updated AfterSalesCaseOutcome (its ``status`` is the
+                       new case status: PROCESSING / REJECTED /
+                       INFORMATION_COLLECTION)
+        eligibility    the serialized EligibilityResult (eligible / reason /
+                       failed_rules / policy_citations / business_facts)
+        investigation  the order + policy evidence actually used
+
+    The workflow never re-derives any of these values: eligibility is decided
+    by the deterministic engine, not by the agent layer (docs/DECISIONS.md
+    Decision 045).
+    """
+
+    case: AfterSalesCaseOutcome
+    eligibility: dict[str, Any] = field(default_factory=dict)
+    investigation: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def status(self) -> str:
+        return self.case.status
+
+    @property
+    def needs_information(self) -> bool:
+        return self.case.needs_information
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case": self.case.to_dict(),
+            "eligibility": dict(self.eligibility),
+            "investigation": dict(self.investigation),
+        }
+
+
+class CaseInvestigatorLike(Protocol):
+    """Investigation interface the workflow depends on (Phase 9C).
+
+    ``AfterSalesInvestigationService`` (service layer) structurally satisfies
+    it: it owns OrderService + the existing RAG pipeline + the deterministic
+    EligibilityEngine. The agent layer never imports SQLAlchemy or retrieval,
+    and never touches the database itself.
+    """
+
+    def investigate(
+        self, case: AfterSalesCaseOutcome
+    ) -> AfterSalesInvestigationOutcome:
+        """Investigate one complete case and return the updated case."""
+        ...

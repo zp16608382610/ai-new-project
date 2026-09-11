@@ -200,6 +200,51 @@ def _risk_decision_dict(decision: RiskDecision) -> JsonDict:
     }
 
 
+def _investigation_timeline_steps(
+    eligibility: JsonDict, investigation: JsonDict
+) -> list[JsonDict]:
+    """Phase 9C timeline: Order Investigation -> Policy Retrieval -> Eligibility.
+
+    Replays exactly what the investigation service recorded; nothing is
+    re-derived here (no second trace system).
+    """
+    order = investigation.get("order")
+    policy = investigation.get("policy")
+    order = order if isinstance(order, dict) else {}
+    policy = policy if isinstance(policy, dict) else {}
+    steps: list[JsonDict] = [
+        {
+            "label": "Order Investigation",
+            "state": str(order.get("state") or "failed"),
+            "detail": str(order.get("detail") or "未取得订单业务数据"),
+        },
+        {
+            "label": "Policy Retrieval",
+            "state": str(policy.get("state") or "failed"),
+            "detail": str(policy.get("detail") or "未取得政策依据"),
+            "query": policy.get("query"),
+            "citations": [str(item) for item in (policy.get("citations") or [])],
+        },
+    ]
+    eligible = eligibility.get("eligible")
+    if eligible is True:
+        state = "success"
+    elif eligible is False:
+        state = "failed"
+    else:
+        state = "pending"
+    failed_rules = [str(item) for item in (eligibility.get("failed_rules") or [])]
+    detail = str(eligibility.get("reason") or "")
+    if failed_rules:
+        detail = (detail + " " if detail else "") + "未通过规则:" + "、".join(failed_rules)
+    step: JsonDict = {"label": "Eligibility Check", "state": state, "detail": detail}
+    citations = [str(item) for item in (eligibility.get("policy_citations") or [])]
+    if citations:
+        step["citations"] = citations
+    steps.append(step)
+    return steps
+
+
 def _summarize_tool_result(result: dict[str, Any]) -> str:
     tool = str(result.get("tool_name") or "")
     status = str(result.get("status") or "")
@@ -332,6 +377,17 @@ def _build_timeline(
     case = state.after_sales_case
     if isinstance(case, dict) and case.get("case_id"):
         steps.extend(_case_timeline_steps(case))
+    eligibility = state.after_sales_eligibility or result.after_sales_eligibility
+    investigation = (
+        state.after_sales_investigation or result.after_sales_investigation
+    )
+    if isinstance(eligibility, dict) and eligibility:
+        steps.extend(
+            _investigation_timeline_steps(
+                eligibility,
+                investigation if isinstance(investigation, dict) else {},
+            )
+        )
     route_value = result.route.value if result.route else (state.route.value if state.route else None)
     if route_value:
         steps.append({"label": "Route", "state": "success", "detail": f"Route: {route_value}"})
@@ -511,6 +567,13 @@ def build_run_payload(
     sources = _source_items(package)
     # Phase 9B: after-sales case created/updated by this run (None otherwise).
     case_block = state.after_sales_case or result.after_sales_case
+    # Phase 9C: deterministic eligibility conclusion + the evidence behind it.
+    eligibility_block = (
+        state.after_sales_eligibility or result.after_sales_eligibility
+    )
+    investigation_block = (
+        state.after_sales_investigation or result.after_sales_investigation
+    )
 
     risk: JsonDict | None = None
     approval_block: JsonDict | None = None
@@ -598,6 +661,12 @@ def build_run_payload(
         "risk": risk,
         "approval": approval_block,
         "case": case_block,
+        "eligibility": (
+            dict(eligibility_block) if isinstance(eligibility_block, dict) else None
+        ),
+        "investigation": (
+            dict(investigation_block) if isinstance(investigation_block, dict) else None
+        ),
         "expected_refund": {"amount": expected_amount, "order_ref": expected_refund_order}
         if expected_amount is not None
         else None,
@@ -635,7 +704,9 @@ def build_text(
 
     case = state.after_sales_case or result.after_sales_case
     if isinstance(case, dict) and case.get("case_id"):
-        return _case_text(case)
+        return _case_text(
+            case, state.after_sales_eligibility or result.after_sales_eligibility
+        )
 
     if status in (AgentResultStatus.WAITING_USER_CONFIRMATION.value,):
         return result.confirmation_message or "该操作需要您确认后才能执行,请确认是否继续?"
@@ -686,26 +757,48 @@ def build_text(
     return _final_text_from_tool(str(tool.get("tool_name")), dict(tool.get("data") or {}), resolution)
 
 
-def _case_text(case: JsonDict) -> str:
-    """Deterministic Phase 9B reply for the after-sales case branch.
+def _missing_asks(missing: list[str]) -> str:
+    asks: list[str] = []
+    if "order_id" in missing:
+        asks.append("提供对应的订单号")
+    if "requested_action" in missing:
+        asks.append("告诉我是希望退款、换货还是维修")
+    if "problem_description" in missing:
+        asks.append("描述一下具体的问题")
+    if not asks:
+        asks.append("补充相关信息")
+    return "，并".join(asks)
 
-    Information collection asks only for what is really missing; a complete
-    case states the next step (eligibility check) without performing it.
+
+def _case_text(case: JsonDict, eligibility: JsonDict | None = None) -> str:
+    """Deterministic reply for the after-sales case branch (9B + 9C).
+
+    Phase 9B asks only for what is really missing. Phase 9C additionally
+    reports the deterministic eligibility conclusion. The text only repeats
+    what the case row and the EligibilityResult already decided: it never
+    re-derives eligibility and never invents a policy claim.
     """
-    missing = [str(item) for item in (case.get("missing_information") or [])]
-    if missing:
-        asks: list[str] = []
-        if "order_id" in missing:
-            asks.append("提供对应的订单号")
-        if "requested_action" in missing:
-            asks.append("告诉我是希望退款、换货还是维修")
-        if "problem_description" in missing:
-            asks.append("描述一下具体的问题")
-        if not asks:
-            asks.append("补充相关信息")
-        return "可以帮你处理售后。请先" + "，并".join(asks) + "。"
+    if not isinstance(eligibility, dict) or not eligibility:
+        collected = case.get("collected_information")
+        stored = collected.get("eligibility") if isinstance(collected, dict) else None
+        eligibility = stored if isinstance(stored, dict) else None
 
+    missing = [str(item) for item in (case.get("missing_information") or [])]
     action = _CASE_ACTION_LABEL.get(str(case.get("requested_action") or ""), "售后")
+    reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
+
+    if reason and not missing:
+        if eligibility.get("eligible") is True:
+            return f"{reason}该订单符合{action}条件，已进入后续处理。"
+        if eligibility.get("eligible") is False:
+            return f"{reason}该订单暂不符合{action}条件，如有疑问可转人工客服。"
+        return f"{reason}该订单需要人工复核。"
+
+    if reason:
+        return f"{reason}请先{_missing_asks(missing)}。"
+    if missing:
+        return "可以帮你处理售后。请先" + _missing_asks(missing) + "。"
+
     ref = _case_ref(case)
     if ref:
         return (

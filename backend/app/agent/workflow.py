@@ -28,7 +28,13 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
-from app.agent.after_sales import AfterSalesCaseManagerLike, AfterSalesCaseOutcome
+from app.agent.after_sales import (
+    STATUS_ELIGIBILITY_CHECK,
+    AfterSalesCaseManagerLike,
+    AfterSalesCaseOutcome,
+    AfterSalesInvestigationOutcome,
+    CaseInvestigatorLike,
+)
 from app.agent.entities import DeterministicEntityExtractor, EntityExtractor, ExtractedEntities
 from app.agent.intent import (
     DeterministicIntentClassifier,
@@ -191,6 +197,7 @@ class AgentWorkflow:
         llm_intent: 'LLMIntentExtractor | None' = None,
         llm_responder: 'FinalResponder | None' = None,
         case_manager: AfterSalesCaseManagerLike | None = None,
+        case_investigator: CaseInvestigatorLike | None = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
@@ -203,6 +210,7 @@ class AgentWorkflow:
         self._llm_intent = llm_intent
         self._llm_responder = llm_responder
         self._case_manager = case_manager
+        self._case_investigator = case_investigator
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -238,6 +246,10 @@ class AgentWorkflow:
     @property
     def case_manager(self) -> AfterSalesCaseManagerLike | None:
         return self._case_manager
+
+    @property
+    def case_investigator(self) -> CaseInvestigatorLike | None:
+        return self._case_investigator
 
 
     def run(
@@ -385,7 +397,7 @@ class AgentWorkflow:
     def _run_case_management(
         self, state: AgentState, *, active_case_id: str | None = None
     ) -> AgentResult | None:
-        """Phase 9B Case Upsert + Information Collection step.
+        """Phase 9B Case Upsert + Information Collection (+ 9C investigation).
 
         Returns None when the message is not an after-sales case request (the
         workflow then continues on its normal path) or when the case service
@@ -419,12 +431,61 @@ class AgentWorkflow:
                 needs_clarification=True,
                 after_sales_case=case,
             )
+
+        # Phase 9C: a complete case (ELIGIBILITY_CHECK) is investigated against
+        # the real business data + the retrieved policy evidence. The conclusion
+        # comes from the deterministic EligibilityEngine, never from the LLM
+        # (docs/DECISIONS.md Decision 045).
+        investigation = self._run_case_investigation(state, outcome)
+        if investigation is None:
+            return AgentResult(
+                status=AgentResultStatus.SUCCESS,
+                intent=state.intent,
+                route=state.route,
+                after_sales_case=case,
+            )
+
+        case = investigation.case.to_dict()
+        state.after_sales_case = case
+        state.after_sales_eligibility = investigation.eligibility
+        state.after_sales_investigation = investigation.investigation
         return AgentResult(
-            status=AgentResultStatus.SUCCESS,
+            status=(
+                AgentResultStatus.NEEDS_CLARIFICATION
+                if investigation.needs_information
+                else AgentResultStatus.SUCCESS
+            ),
             intent=state.intent,
             route=state.route,
+            needs_clarification=investigation.needs_information,
             after_sales_case=case,
+            after_sales_eligibility=investigation.eligibility,
+            after_sales_investigation=investigation.investigation,
         )
+
+    def _run_case_investigation(
+        self, state: AgentState, outcome: AfterSalesCaseOutcome
+    ) -> AfterSalesInvestigationOutcome | None:
+        """Phase 9C Order + Policy Investigation -> Eligibility Check.
+
+        The injected investigator owns OrderService, the existing RAG pipeline
+        and the deterministic EligibilityEngine; the agent layer only receives
+        the serialized result. A failing investigation must never break the
+        chat flow: it is logged and the case keeps its ELIGIBILITY_CHECK state.
+        """
+        if self._case_investigator is None:
+            return None
+        if outcome.status != STATUS_ELIGIBILITY_CHECK:
+            return None
+        state.status = WorkflowStage.CASE_INVESTIGATION
+        try:
+            return self._case_investigator.investigate(outcome)
+        except Exception as exc:  # guarded boundary: chat must keep working
+            logger.warning(
+                "after-sales eligibility investigation failed: %s",
+                type(exc).__name__,
+            )
+            return None
 
     @staticmethod
     def _merge_entities(

@@ -264,18 +264,32 @@ class AfterSalesCaseManager:
     def _outcome(
         view: AfterSalesCaseView, *, created: bool, order_ref: str | None
     ) -> AfterSalesCaseOutcome:
-        collected = dict(view.collected_information or {})
-        return AfterSalesCaseOutcome(
-            case_id=view.case_id,
-            user_id=view.user_id,
-            case_type=view.case_type,
-            requested_action=view.requested_action,
-            problem_description=view.problem_description,
-            status=view.status,
-            risk_level=view.risk_level,
-            missing_information=tuple(view.missing_information or []),
-            collected_information=collected,
-            order_id=view.order_id,
-            order_ref=order_ref or collected.get("order_ref"),
-            created=created,
-        )
+        return outcome_from_view(view, created=created, order_ref=order_ref)
+
+
+def outcome_from_view(
+    view: AfterSalesCaseView, *, created: bool, order_ref: str | None
+) -> AfterSalesCaseOutcome:
+    """Project one persisted case row onto the agent-layer outcome.
+
+    Module-level so the Phase 9C investigation service reports exactly the same
+    case shape to the workflow as the case-management step does.
+    """
+    collected = dict(view.collected_information or {})
+    return AfterSalesCaseOutcome(
+        case_id=view.case_id,
+        user_id=view.user_id,
+        case_type=view.case_type,
+        requested_action=view.requested_action,
+        problem_description=view.problem_description,
+        status=view.status,
+        risk_level=view.risk_level,
+        missing_information=tuple(view.missing_information or []),
+        collected_information=collected,
+        order_id=view.order_id,
+        order_ref=order_ref or collected.get("order_ref"),
+        created=created,
+    )
+
+
+__all__ = ["AfterSalesCaseManager", "outcome_from_view"]

@@ -187,8 +187,9 @@ def test_cancel_short_order_ref_ord2_reaches_confirmation(demo_api, monkeypatch)
 
 
 def test_after_sales_case_multi_turn_api(demo_api):
-    """The objective's two-turn information-collection example, end to end."""
+    """The two-turn example, end to end (Phase 9B upsert + Phase 9C investigation)."""
     client, session = demo_api
+    refunds_before = len(session.scalars(select(Refund)).all())
     first = _chat(client, "我的耳机坏了，帮我处理一下。")
 
     assert first["intent"] == "AFTER_SALES_REQUEST"
@@ -216,13 +217,59 @@ def test_after_sales_case_multi_turn_api(demo_api):
     assert updated["created"] is False
     assert updated["order_ref"] == "ORD-1004"
     assert updated["requested_action"] == "EXCHANGE"
-    assert updated["status"] == "ELIGIBILITY_CHECK"
-    assert updated["missing_information"] == []
-    assert second["text"] == (
-        "已获取订单 ORD-1004 和换货诉求，接下来可以检查该订单是否符合换货条件。"
-    )
-    # Phase 9B manages case state only: one case, no business write.
+    # Phase 9C investigates every complete case. ORD-1004 does not exist in the
+    # business system, and "we cannot find the order" must never be reported as
+    # "you are not eligible" (Phase 9C objective, section 6).
+    assert updated["status"] == "INFORMATION_COLLECTION"
+    assert updated["missing_information"] == ["order_id"]
+    eligibility = second["eligibility"]
+    assert eligibility["eligible"] is None
+    assert eligibility["failed_rules"] == ["order_available"]
+    assert second["text"].startswith("未找到订单 ORD-1004")
+    labels = [step["label"] for step in second["steps"]]
+    assert "Order Investigation" in labels
+    assert "Eligibility Check" in labels
+    # Investigation only: one case, still no business write.
     assert len(AfterSalesService(session).list_cases(user_id=1)) == 1
+    assert len(session.scalars(select(Refund)).all()) == refunds_before
+
+
+def test_after_sales_eligibility_check_api(demo_api):
+    """Phase 9C: a complete case runs Order + Policy investigation over HTTP."""
+    client, session = demo_api
+    refunds_before = len(session.scalars(select(Refund)).all())
+    _chat(client, "我的耳机坏了，帮我处理一下。")
+    second = _chat(client, "订单是 ORD-1003，我想换货。")
+
+    case = second["case"]
+    assert case["requested_action"] == "EXCHANGE"
+    # The window decision depends on the real clock, so the conclusion is
+    # asserted (PROCESSING or REJECTED) instead of a clock-fragile status.
+    assert case["status"] in ("PROCESSING", "REJECTED")
+    eligibility = second["eligibility"]
+    assert eligibility["eligible"] in (True, False)
+    facts = eligibility["business_facts"]
+    assert facts["order_id"] == 1003
+    assert facts["order_exists"] is True
+    assert facts["owner_user_id"] == 1
+    assert facts["order_status"] == "DELIVERED"
+    assert facts["source"] == "OrderService"
+    assert facts["delivery_reference_source"] == "orders.updated_at"
+    assert eligibility["policy_citations"]
+    assert eligibility["policy_facts"]["covers_action"] is True
+    assert eligibility["policy_facts"]["window_days"] == 15
+    assert second["investigation"]["order"]["state"] == "success"
+    assert second["investigation"]["policy"]["state"] == "success"
+    labels = [step["label"] for step in second["steps"]]
+    assert labels[:5] == [
+        "Understand",
+        "Case Upsert",
+        "Order Investigation",
+        "Policy Retrieval",
+        "Eligibility Check",
+    ]
+    # Phase 9C stops at the eligibility conclusion: nothing is executed.
+    assert len(session.scalars(select(Refund)).all()) == refunds_before
 
 
 def test_non_after_sales_chat_has_no_case(demo_api):

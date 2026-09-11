@@ -13,7 +13,7 @@
 
 ## Current Phase
 
-**Phase 7C – Evaluation + Observability + Final Demo Packaging(completed)**
+**Phase 9C – After-Sales Investigation + Eligibility(completed)**
 
 Phase 1(Foundation)、Phase 2A(数据层)、Phase 2B(Mock Business API)、Phase 2C(Business Scenario Tests)、Phase 3A(知识库接入)、Phase 3B(混合检索)、Phase 3C(Reranking + Context Assembly)、Phase 4A(Agent Workflow 骨架)、Phase 4B(Tool Execution)、Phase 5(Risk Control + Human-in-the-loop)与 Phase 6(MCP MVP)已完成。当前状态:FastAPI 骨架、7 张 Mock 业务表 + 订单 / 物流 / 退款 / 取消 / 工单 HTTP API、Repository / Service 分层与场景化测试;知识库 `knowledge_documents` / `knowledge_chunks`(Alembic 迁移 `018c7c0772c7`)+ 入库管线;检索层 `app/retrieval/`:**Query Processing → Dense + BM25 → RRF Fusion → Candidate Set → Reranking → Context Assembly → Final Context**(内部 `RetrievalPipeline`,无公开 RAG 端点);Agent 层 `app/agent/`(Intent / Route / Workflow)与工具层 `app/tools/`(Tool Registry → Tool Executor → Service → Repository → Database,六个售后工具 + Pydantic 校验 + trusted user_id 授权 + 统一 ToolResult)。Phase 5 在 Agent 工具执行路径接入风险门:Risk Engine 分级(LOW / MEDIUM / HIGH / CRITICAL)+ Risk Gate(取消需用户确认、退款默认人工审批)+ approval_requests 审批表 + /api/v1/approvals 审批 API + Resume 原 ToolRequest + Execute→Verify(详见 docs/RISK_CONTROL.md)。Phase 6 在工具执行路径叠加 MCP:本地 stdio MCP Server(`ecommerce-customer-service`,官方 SDK `mcp==2.1.1`)只暴露 `get_order` / `get_logistics` / `create_ticket`;`MCPToolAdapter` 让 ORDER_STATUS / LOGISTICS_TRACKING / CREATE_TICKET 走 MCP,REFUND / CANCEL 仍走内部 Tool Executor + Risk Gate——Risk Gate 先于 MCP,退款不通过 MCP 绕过审批(详见 docs/MCP.md 与 docs/ARCHITECTURE.md §20)。检索默认只取 ACTIVE 版本(退款 v1/v2 已测试);支持 category / language / status typed 过滤;27 条确定性检索数据集 + rerank/context 单元与端到端用例。RAG 检索仍为确定性流水线(无 LLM rewrite);Phase 7B 起,LLM 最终回复生成只消费 RAG / Tool 权威证据(独立语义 Grounding 验证器尚未实现);`DeterministicReranker` 是「可替换架构 + 确定性测试实现」而非语义模型;Context 受 token budget(默认 2000,支持 reserve)控制并保留 citation/溯源;真实 Embedding 模型与 pgvector 未接入/未实测。
 
@@ -25,11 +25,14 @@ Phase 7B 在不重写 Agent / Risk / Approval / Tools / MCP / Retrieval 的前�
 Phase 7C 在不动 Agent / Risk / Approval / Tools / MCP / Retrieval 核心的前提下完成三项打包:① **Evaluation**(`backend/app/evaluation/`):9 类场景 11 个固定 case(FAQ/RAG、订单、物流、取消、退款、越权、业务规则拒绝、信息缺失、Prompt Injection / 越权指令),复用真实 `/demo/chat` 链路在隔离临时 SQLite 上执行,输出 Intent / Entity / Route / Risk / Approval / Execution / Verification 七项指标与逐 case Expected / Actual / failure reason——确定性离线模式(use_llm=false)11/11 通过,`POST /api/v1/demo/evaluation/run` 与前端 `/evaluation` 页可一键复现;② **Observability / Trace**:AgentState 记录每次 Risk Gate 判定(`risk_decisions`),demo timeline 输出结构化 Risk Gate 步骤(Tool → Risk Gate → Approval → Execute → Verify → Final Response),不记录 API Key / secret;③ **Final Demo Packaging**:docs/FINAL_DEMO.md(8 个固定演示场景 + 面试讲解点 + Known Limitations)。新增 11 例 Evaluation / Trace 测试,全套 391 例全绿(确定性离线运行);详见 docs/ARCHITECTURE.md §23 与 docs/DECISIONS.md Decision 042。
 
 
+
+Phase 9A 落地独立售后案件领域模型(`after_sales_cases` + `AfterSalesCaseStatus`,不接入 Agent);Phase 9B 让 Agent 识别售后处理请求并创建 / 更新 Case、完成基础信息收集(`Intent.AFTER_SALES_REQUEST` / `Route.AFTER_SALES_CASE` / `WorkflowStage.CASE_MANAGEMENT`,见 docs/ARCHITECTURE.md §25);Phase 9C 让 `ELIGIBILITY_CHECK` 的案件自动完成售后调查:Order Investigation(业务事实:订单存在性 / 归属 / 状态 / 商品可退性 / 在途退款 / 签收参考时间)+ Policy Investigation(复用既有 Hybrid RAG 取得政策证据与 citation)→ 由纯领域 `EligibilityEngine` 给出确定性资格结论(三态 `eligible`),案件随之进入 `PROCESSING` / `REJECTED` / 返回 `INFORMATION_COLLECTION`;Agent 层仍不直接访问数据库,调查通过注入的 Protocol 完成。LLM 只做理解,不产生业务事实,也不能决定资格(见 docs/ARCHITECTURE.md §26 与 docs/DECISIONS.md Decision 045 / 046)。本阶段**不执行**退款 / 换货 / 维修,不改动 RefundService / CancelOrder / Risk Gate / HITL / Execute / Verify;新增 35 例测试(含 6 个售后评测 case 与新 `CASE` 指标),全套 480 例全绿。
+
 ## Next Phase
 
-**Phase 8 – Evaluation + Observability(规模化 / 生产级,not started)**
+**Next: Phase 9D – After-Sales Execution(退款 / 换货 / 维修),not started**
 
-7C 已落地固定数据集评测与单机 Trace MVP;Phase 8 保留规模化评测集(Retrieval / Generation / Agent / Tool / Product 五层)、生产级指标与日志聚合。Phase 9(Final Demo 现场彩排 / 验收)与 Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
+Phase 9D 及以后仍需补齐:售后资格的**执行**(退款 / 换货 / 维修,必须复用既有 Risk Gate + HITL + Execute → Verify)、售后金额计算、人工复核流程。Phase 8 保留规模化评测集(Retrieval / Generation / Agent / Tool / Product 五层)、生产级指标与日志聚合;Phase 3D(知识库管理 + 真实 Embedding / pgvector 实机验证)与 Phase 9 Final Demo(现场彩排 / 验收)仍为 not started,范围独立,可后续单独推进。详细路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
 
 ## 架构一览
 

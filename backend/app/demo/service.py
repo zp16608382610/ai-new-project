@@ -19,6 +19,7 @@ only gets a JSON projection of the real AgentState/AgentResult.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from app.retrieval.pipeline import RetrievalPipeline
 from app.risk import RiskEngine
 from app.services.approval_service import ApprovalService
 from app.services.after_sales_case_manager import AfterSalesCaseManager
+from app.services.after_sales_investigation import AfterSalesInvestigationService
 from app.services.verification import BusinessVerifier
 from app.tools.executor import ToolExecutor
 from app.tools.handlers import build_default_registry
@@ -59,6 +61,7 @@ class DemoComponents:
         mcp_client: MCPClient | None = None,
         llm_intent: LLMIntentExtractor | None = None,
         llm_responder: FinalResponder | None = None,
+        investigation_reference_time: datetime | None = None,
     ) -> None:
         self.session = session
         self.internal_executor = ToolExecutor(build_default_registry(session))
@@ -73,6 +76,15 @@ class DemoComponents:
         self.retrieval = RetrievalPipeline(session)
         # Phase 9B: the agent's after-sales case upsert step (same DB session).
         self.case_manager = AfterSalesCaseManager(session)
+        # Phase 9C: order + policy investigation feeding the deterministic
+        # eligibility engine. The reference time is injectable so the
+        # Evaluation runner can pin the after-sales window; the live demo uses
+        # the real clock (never a fabricated date).
+        self.investigator = AfterSalesInvestigationService(
+            session,
+            retrieval=self.retrieval,
+            reference_time=investigation_reference_time,
+        )
         self.workflow = AgentWorkflow(
             retrieval=self.retrieval,
             tool_executor=self.provider,
@@ -82,6 +94,7 @@ class DemoComponents:
             llm_intent=llm_intent,
             llm_responder=llm_responder,
             case_manager=self.case_manager,
+            case_investigator=self.investigator,
         )
         self.llm_provider_name = "DeepSeek" if llm_intent is not None else None
 
@@ -192,6 +205,7 @@ def run_chat(
     user_confirmed: bool | None = None,
     mcp_client: MCPClient | None = None,
     use_llm: bool | None = None,
+    investigation_reference_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Run one user message through the real Agent workflow and store the run.
 
@@ -206,6 +220,7 @@ def run_chat(
         mcp_client=mcp_client,
         llm_intent=llm_intent,
         llm_responder=llm_responder,
+        investigation_reference_time=investigation_reference_time,
     )
     run_session = session_id or new_session_id()
     run_request = request_id or new_request_id()
