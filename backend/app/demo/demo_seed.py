@@ -12,10 +12,15 @@ extractor (ORD-<3+ digits>) and the Phase 5/6 test vocabulary match:
 Demo orders belong to the users created by seed_dev_data (Alice id 1 / Bob id 2).
 This module is used by backend/app/demo/bootstrap.py and the demo API tests; it
 is NOT part of the production migration path.
+
+Timestamps are anchored to a single injectable "now" (the real clock by
+default) instead of fixed calendar dates, so the live demo still sits inside
+the 15-day after-sales window whenever it is run. Tests and the evaluation
+runner pass a fixed anchor for determinism.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,15 +33,25 @@ from app.knowledge.seed import seed_knowledge
 UTC = timezone.utc
 
 
+def _reference_now() -> datetime:
+    """Reference "now" for the demo dataset (the wall clock by default)."""
+    return datetime.now(UTC)
+
+
 def demo_orders_present(session: Session) -> bool:
     """True when the agent-facing demo orders already exist in this database."""
     return session.get(Order, 1001) is not None
 
 
-def seed_demo_orders(session: Session) -> bool:
-    """Insert the agent-facing demo orders (idempotent). Requires dev seed."""
+def seed_demo_orders(session: Session, *, now: datetime | None = None) -> bool:
+    """Insert the agent-facing demo orders (idempotent). Requires dev seed.
+
+    ``now`` anchors every demo timestamp; when omitted the real clock is used
+    so the live demo orders stay inside the current after-sales window.
+    """
     if demo_orders_present(session):
         return False
+    anchor = now or _reference_now()
     alice = session.scalar(select(User).where(User.email == "alice@example.com"))
     bob = session.scalar(select(User).where(User.email == "bob@example.com"))
     if alice is None or bob is None:
@@ -67,19 +82,19 @@ def seed_demo_orders(session: Session) -> bool:
 
     o1001 = _add(
         1001, alice, OrderStatus.DELIVERED, "Wireless Earbuds Pro", 1,
-        datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+        anchor - timedelta(days=4),
     )
     _add(
         1002, alice, OrderStatus.PAID, "Cotton T-Shirt", 1,
-        datetime(2026, 8, 21, 10, 0, tzinfo=UTC),
+        anchor - timedelta(days=3),
     )
     _add(
         1003, alice, OrderStatus.DELIVERED, "LED Desk Lamp", 1,
-        datetime(2026, 8, 22, 10, 0, tzinfo=UTC),
+        anchor - timedelta(days=2),
     )
     _add(
         2001, bob, OrderStatus.PAID, "Wireless Earbuds Pro", 1,
-        datetime(2026, 8, 23, 10, 0, tzinfo=UTC),
+        anchor - timedelta(days=1),
     )
     session.add(
         Logistics(
@@ -87,15 +102,15 @@ def seed_demo_orders(session: Session) -> bool:
             carrier="SF Express",
             tracking_number="SF10020099",
             status=LogisticsStatus.IN_TRANSIT,
-            estimated_delivery=date(2026, 8, 26),
-            updated_at=datetime(2026, 8, 23, 10, 0, tzinfo=UTC),
+            estimated_delivery=(anchor - timedelta(days=1)).date(),
+            updated_at=anchor - timedelta(days=3),
         )
     )
     session.commit()
     return True
 
 
-def prepare_demo_database(database_url: str) -> None:
+def prepare_demo_database(database_url: str, *, now: datetime | None = None) -> None:
     """Create + seed a local demo SQLite database (schema + dev + demo + KB).
 
     Fast, offline and deterministic - intended for the interview demo and the
@@ -110,7 +125,7 @@ def prepare_demo_database(database_url: str) -> None:
     session = create_session_factory(engine)()
     try:
         seed_dev_data(session)
-        seed_demo_orders(session)
+        seed_demo_orders(session, now=now)
         seed_knowledge(session)
         session.commit()
     finally:

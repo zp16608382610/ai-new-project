@@ -28,7 +28,7 @@ SQLite database.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -64,10 +64,11 @@ from app.services.after_sales_investigation import AfterSalesInvestigationServic
 from app.services.after_sales_service import AfterSalesService
 
 UTC = timezone.utc
-# Seed timestamps are fixed (2026-08-20 / 2026-08-22), so the after-sales window
-# is pinned explicitly instead of depending on the wall clock.
-IN_WINDOW = datetime(2026, 8, 25, tzinfo=UTC)     # ORD-1003: 2 days after delivery
-OUT_OF_WINDOW = datetime(2026, 10, 1, tzinfo=UTC)  # ORD-1003: 39 days after
+# The demo seed anchors its timestamps to an injectable "now"; pinning that
+# anchor here keeps the after-sales window deterministic.
+ANCHOR = datetime(2026, 9, 11, 12, tzinfo=UTC)  # ORD-1003 delivered 2 days before
+IN_WINDOW = ANCHOR                              # 2 days after delivery
+OUT_OF_WINDOW = ANCHOR + timedelta(days=37)     # 39 days after delivery
 
 
 @pytest.fixture()
@@ -76,7 +77,7 @@ def db_session():
     Base.metadata.create_all(engine)
     session = create_session_factory(engine)()
     assert seed_dev_data(session) is True
-    seed_demo_orders(session)
+    seed_demo_orders(session, now=ANCHOR)
     seed_knowledge(session)
     session.commit()
     try:
@@ -110,7 +111,7 @@ def _business_facts(**overrides) -> BusinessFacts:
         currency="CNY",
         items_returnable=True,
         active_refund_count=0,
-        delivery_reference_at="2026-08-22T10:00:00+00:00",
+        delivery_reference_at=(ANCHOR - timedelta(days=2)).isoformat(),
         delivery_reference_source="orders.updated_at",
         days_since_delivery=2,
     )

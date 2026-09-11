@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.evaluation.dataset import (
+    DEMO_ANCHOR,
     FAULT_EXECUTE_FAILURE,
     FAULT_VERIFY_FAILURE,
     EvaluationCase,
@@ -65,7 +66,7 @@ def run_evaluation(
     else:
         # Caller pinned an explicit database: run the whole set against it
         # (the caller owns that DB's lifecycle).
-        prepare_demo_database(database_url)
+        prepare_demo_database(database_url, now=DEMO_ANCHOR)
         engine = create_db_engine(database_url)
         session = create_session_factory(engine)()
         try:
@@ -97,7 +98,7 @@ def _run_case_isolated(case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
 
     url, path = _default_database_url()
     try:
-        prepare_demo_database(url)
+        prepare_demo_database(url, now=DEMO_ANCHOR)
         engine = create_db_engine(url)
         session = create_session_factory(engine)()
         try:

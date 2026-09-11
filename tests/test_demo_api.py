@@ -15,6 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from datetime import datetime, timezone
+
 from app.db.base import Base
 from app.db.models import Order, Refund, Ticket
 from app.db.session import create_db_engine, create_session_factory, get_db
@@ -26,12 +28,16 @@ from app.services.after_sales_service import AfterSalesService
 
 API = "/api/v1"
 
+# The demo seed anchors its timestamps to an injectable "now"; pinning that
+# anchor here keeps the after-sales window deterministic.
+ANCHOR = datetime(2026, 9, 11, 12, tzinfo=timezone.utc)
+
 
 @pytest.fixture()
 def demo_api(tmp_path):
     db_path = tmp_path / "demo.db"
     url = "sqlite+pysqlite:///" + db_path.as_posix()
-    prepare_demo_database(url)
+    prepare_demo_database(url, now=ANCHOR)
     engine = create_db_engine(url)
     session = create_session_factory(engine)()
 
@@ -312,8 +318,8 @@ def test_after_sales_treatment_and_ticket_api(demo_api):
     client, session = demo_api
     refunds_before = len(session.scalars(select(Refund)).all())
     tickets_before = len(session.scalars(select(Ticket)).all())
-    # The seed's delivery timestamps are fixed, so the policy window is pinned.
-    reference = "2026-08-25T00:00:00+00:00"
+    # The seeded delivery timestamps are anchored to ANCHOR, so pin it too.
+    reference = ANCHOR.isoformat()
 
     _chat(
         client,

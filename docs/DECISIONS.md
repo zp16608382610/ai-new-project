@@ -53,6 +53,7 @@
 | 047 | Treatment planning is constrained by Case requested_action and eligibility | Accepted | 2026-09-11 |
 | 048 | After-sales execution passes the existing Risk Gate; success requires Verify | Accepted | 2026-09-11 |
 | 049 | Low-risk refund auto execution (P-REFUND-LOW-RISK-AUTO) | Accepted | 2026-09-11 |
+| 050 | Demo seed timestamps are anchored to an injectable clock | Accepted | 2026-09-11 |
 ## Decision 001 — Static knowledge vs dynamic data
 
 **Decision:**
@@ -651,3 +652,17 @@ A standard, already-verified low-risk after-sales refund may be executed by the 
 - 这是**本项目 demo 定义的业务风险策略**,不是生产级金融风控规则,也不构成任何合规结论;阈值与条件是 policy/config 数据,不是硬编码在业务逻辑里;
 - 不新增第二套 RefundService / RiskEngine / ApprovalService,不新增风险等级,不改变 Execute → Verify 语义;
 - `days_since_delivery` 仅用于可观测性:售后时效窗口由确定性 Eligibility Engine 判定一次,风险层不重复推导,避免出现第二套时效规则。
+
+## Decision 050 — Demo seed timestamps are anchored to an injectable clock, not fixed calendar dates
+
+**Decision:**
+`seed_demo_orders(session, *, now=None)` derives every demo timestamp from a single anchor: ORD-1001 `now - 4d`, ORD-1002 `now - 3d`, ORD-1003 `now - 2d`, ORD-2001 `now - 1d`, logistics `updated_at = now - 3d` / `estimated_delivery = (now - 1d).date()`. When `now` is omitted the real clock is used (`_reference_now()`), so the live demo always sits inside the 15-day after-sales window; tests and the evaluation runner pass a fixed anchor (`DEMO_ANCHOR = 2026-09-11T12:00+00:00` in `app/evaluation/dataset.py`, `ANCHOR` in the after-sales / demo tests) for determinism.
+
+**Reason:**
+固定日历日期会让 demo 随时间「过期」:签收时间写死为 2026-08-22 后,真实时钟一旦超过 15 天窗口,在线 demo 的 ORD-1003 就会被 Eligibility 正确判为 `REJECTED`,Decision 049 的 `P-REFUND-LOW-RISK-AUTO` 自动退款现场无法演示。把锚点做成可注入参数后:
+
+- **生产业务规则一行未改**:Eligibility / Risk Policy / RefundService / Verify 不变,时效窗口仍由真实时钟与检索到的政策文本决定;
+- **演示可复现**:线上 bootstrap 传真实时钟,新种子库上的签收时间永远落在窗口内;测试 / 评测注入固定锚点,结果与运行日期无关;
+- **优先级不变**:ORD-1001(`now - 4d`,金额 1299 >= 500)依然在窗口内,因此仍是 `CRITICAL / HUMAN_APPROVAL`,高额退款不会被自动执行;
+- **不做时钟 mocking**:只把「种子数据的时间」参数化,判定方仍然读真实时钟;
+- **不改写既有数据库**:`demo_orders_present` 幂等短路,已存在的 demo DB 不会被重新种子;若某个持久化 DB 的签收时间已经老化,需要重建种子库。

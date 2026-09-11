@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -72,10 +72,11 @@ from app.services.after_sales_treatment import AfterSalesTreatmentService
 from app.services.ticket_service import TicketService
 
 UTC = timezone.utc
-# Seed timestamps are fixed (ORD-1003 delivered 2026-08-22), so the policy
-# window is pinned explicitly instead of depending on the wall clock.
-IN_WINDOW = datetime(2026, 8, 25, tzinfo=UTC)
-OUT_OF_WINDOW = datetime(2026, 10, 1, tzinfo=UTC)
+# The demo seed anchors its timestamps to an injectable "now"; pinning that
+# anchor here keeps the policy window deterministic.
+ANCHOR = datetime(2026, 9, 11, 12, tzinfo=UTC)  # ORD-1003 delivered 2 days before
+IN_WINDOW = ANCHOR                              # 2 days after delivery
+OUT_OF_WINDOW = ANCHOR + timedelta(days=37)     # 39 days after delivery
 
 
 @pytest.fixture()
@@ -84,7 +85,7 @@ def db_session():
     Base.metadata.create_all(engine)
     session = create_session_factory(engine)()
     assert seed_dev_data(session) is True
-    seed_demo_orders(session)
+    seed_demo_orders(session, now=ANCHOR)
     seed_knowledge(session)
     session.commit()
     try:

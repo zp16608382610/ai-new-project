@@ -65,9 +65,10 @@ from app.services.refund_service import RefundService
 from app.services.verification import BusinessVerifier
 
 UTC = timezone.utc
-# Seed timestamps are fixed (ORD-1003 delivered 2026-08-22), so the after-sales
-# policy window is pinned instead of depending on the wall clock.
-REFERENCE_TIME = datetime(2026, 8, 25, tzinfo=UTC)
+# The demo seed anchors its timestamps to an injectable "now"; pinning that
+# anchor here keeps the after-sales window deterministic.
+ANCHOR = datetime(2026, 9, 11, 12, tzinfo=UTC)  # ORD-1003 delivered 2 days before
+REFERENCE_TIME = ANCHOR                         # 2 days after delivery
 
 REFUND_MESSAGE = "我的耳机坏了，ORD-1003，退款"
 HIGH_VALUE_REFUND_MESSAGE = "我的耳机坏了，ORD-1001，退款"
@@ -80,7 +81,7 @@ def demo(tmp_path):
     """A real file-backed demo database + a fresh run store."""
     db_path = tmp_path / "demo.db"
     url = "sqlite+pysqlite:///" + db_path.as_posix()
-    prepare_demo_database(url)
+    prepare_demo_database(url, now=ANCHOR)
     engine = create_db_engine(url)
     session = create_session_factory(engine)()
     try:
@@ -97,7 +98,7 @@ def db_session():
     Base.metadata.create_all(engine)
     session = create_session_factory(engine)()
     assert seed_dev_data(session) is True
-    seed_demo_orders(session)
+    seed_demo_orders(session, now=ANCHOR)
     session.commit()
     try:
         yield session

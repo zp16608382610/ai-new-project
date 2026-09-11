@@ -564,7 +564,7 @@ service   AfterSalesInvestigationService.investigate(case)
 - `eligible` 三态：`True` -> `PROCESSING`；`False` -> `REJECTED`；`None` -> `INFORMATION_COLLECTION`（缺权威信息）或保持 `ELIGIBILITY_CHECK`（政策未覆盖 / 缺时效信息，`requires_human_review=True`）。
 - 业务红线：订单不存在 / 订单不属于当前用户 / 缺少订单号属于**调查失败或信息问题**，永远返回 `eligible=None` + `missing_information`，而不是 `eligible=False`。
 - 签收参考时间：`orders` 表没有 `delivered_at`。规则为 DELIVERED 物流记录优先，否则使用 DELIVERED 订单的 `updated_at`，并把取值来源写入 `business_facts.delivery_reference_source`（不推测、不臆造）。
-- 时效窗口：由检索到的政策文本解析（如「签收后十五天内」-> 15 天）并保留 `window_citation`；测试与 Evaluation 通过注入 `reference_time` 固定窗口，避免结果随真实时间漂移（线上 demo 使用真实时钟）。
+- 时效窗口：由检索到的政策文本解析（如「签收后十五天内」-> 15 天）并保留 `window_citation`；demo 种子数据的签收时间以可注入的 `now` 为锚点相对生成（`seed_demo_orders(session, now=...)`，见 Decision 050），线上 bootstrap 传真实时钟因此签收时间始终落在窗口内；测试与 Evaluation 通过注入固定锚点 / `reference_time` 固定窗口，避免结果随真实时间漂移。
 - 金额：资格判定不计算金额。退款金额仍由业务系统（RefundService）在真正执行时给出。
 
 ### 26.4 Demo 与 Observability
@@ -619,7 +619,7 @@ HTTP / Chat
 
 ### 27.5 Demo 与 Observability
 
-`/api/v1/demo/chat` payload 新增 `treatment` / `ticket`;timeline 复用既有机制,在 `Eligibility Check` 之后新增 `Treatment Plan` / `Ticket Creation` 两个步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status,前端无需改动。售后时效按真实时钟判定(seed 签收时间固定,线上 demo 可能得到 `REJECTED`),脚本化 demo / 评测可通过可选 `reference_time` 固定窗口。评测 runner 为**每个 case 单独准备一次性种子数据库**,避免跨 case 状态泄漏(共享 DB 时,退款 case 留下的在途退款会让后续 ORD-1003 售后 case 命中 `no_active_refund` 而误判 REJECTED)。
+`/api/v1/demo/chat` payload 新增 `treatment` / `ticket`;timeline 复用既有机制,在 `Eligibility Check` 之后新增 `Treatment Plan` / `Ticket Creation` 两个步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status,前端无需改动。售后时效按真实时钟判定,但 demo 种子数据的签收时间以可注入的 `now` 为锚点相对生成(线上 bootstrap 传真实时钟,见 Decision 050),因此新种子库上的线上 demo 始终落在 15 天窗口内;脚本化 demo / 评测可通过可选 `reference_time` 固定窗口(若 demo DB 被长期持久化超过窗口,需重建种子库)。评测 runner 为**每个 case 单独准备一次性种子数据库**,避免跨 case 状态泄漏(共享 DB 时,退款 case 留下的在途退款会让后续 ORD-1003 售后 case 命中 `no_active_refund` 而误判 REJECTED)。
 
 ### 27.6 明确未实现
 
