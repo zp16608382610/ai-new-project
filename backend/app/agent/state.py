@@ -43,6 +43,9 @@ class Intent(str, enum.Enum):
     REFUND_REQUEST = "REFUND_REQUEST"
     CANCEL_ORDER = "CANCEL_ORDER"
     CREATE_TICKET = "CREATE_TICKET"
+    # Phase 9B: the user asks the agent to HANDLE a product/order problem
+    # (damaged item, exchange, repair) as opposed to asking a question about it.
+    AFTER_SALES_REQUEST = "AFTER_SALES_REQUEST"
     UNSUPPORTED = "UNSUPPORTED"
     AMBIGUOUS = "AMBIGUOUS"
 
@@ -56,6 +59,8 @@ class Route(str, enum.Enum):
     REFUND_TOOL = "REFUND_TOOL"
     CANCEL_TOOL = "CANCEL_TOOL"
     TICKET_TOOL = "TICKET_TOOL"
+    # Phase 9B: after-sales case management branch (no business write).
+    AFTER_SALES_CASE = "AFTER_SALES_CASE"
     CLARIFY = "CLARIFY"
     ESCALATE = "ESCALATE"
 
@@ -66,6 +71,8 @@ class WorkflowStage(str, enum.Enum):
     START = "START"
     UNDERSTAND = "UNDERSTAND"
     CLASSIFY_INTENT = "CLASSIFY_INTENT"
+    # Phase 9B: after-sales case upsert + information collection.
+    CASE_MANAGEMENT = "CASE_MANAGEMENT"
     ROUTE = "ROUTE"
     RAG = "RAG"
     BUSINESS_TOOL_REQUEST = "BUSINESS_TOOL_REQUEST"
@@ -176,6 +183,9 @@ class AgentResult:
     error: str | None = None
     approval_id: int | None = None
     confirmation_message: str | None = None
+    # Phase 9B: structured after-sales case (created or updated) when this run
+    # was handled by the case-management branch. None for every other route.
+    after_sales_case: JsonDict | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -190,6 +200,9 @@ class AgentResult:
             "error": self.error,
             "approval_id": self.approval_id,
             "confirmation_message": self.confirmation_message,
+            "after_sales_case": dict(self.after_sales_case)
+            if self.after_sales_case is not None
+            else None,
         }
 
     @classmethod
@@ -208,6 +221,11 @@ class AgentResult:
             error=data.get("error"),
             approval_id=data.get("approval_id"),
             confirmation_message=data.get("confirmation_message"),
+            after_sales_case=(
+                dict(data["after_sales_case"])
+                if isinstance(data.get("after_sales_case"), dict)
+                else None
+            ),
         )
 
 
@@ -235,6 +253,8 @@ class AgentState:
     # Observability: every Risk Gate decision made for this request (Phase 7C).
     # Each item mirrors RiskDecision.to_dict() plus the evaluated tool name.
     risk_decisions: tuple[dict[str, Any], ...] = ()
+    # Phase 9B: the after-sales case this request created or updated.
+    after_sales_case: JsonDict | None = None
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
@@ -268,6 +288,9 @@ class AgentState:
             "tool_requests": [request.to_dict() for request in self.tool_requests],
             "tool_results": [dict(item) for item in self.tool_results],
             "risk_decisions": [dict(item) for item in self.risk_decisions],
+            "after_sales_case": dict(self.after_sales_case)
+            if self.after_sales_case is not None
+            else None,
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
@@ -301,6 +324,9 @@ class AgentState:
         entities_data = data.get("entities")
         if isinstance(entities_data, dict):
             state.entities = ExtractedEntities.from_dict(entities_data)
+        case_data = data.get("after_sales_case")
+        if isinstance(case_data, dict):
+            state.after_sales_case = dict(case_data)
         # retrieved_context is a runtime-only structured object; serialization
         # keeps a summary (see to_dict). Deserialization intentionally restores
         # the serializable contract with retrieved_context=None.

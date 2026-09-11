@@ -505,3 +505,28 @@ AfterSalesCase (售后案件;Phase 9A 只落地数据对象 + 最小 CRUD)
 - **与 Ticket 的区别**:`Ticket` 是「人对人的工单」(分类 / 优先级 / 处理状态);`AfterSalesCase` 承载 AI 参与的售后流程状态、结构化已收集 / 缺失信息与转人工摘要(Decision 043)。
 - **风控词表复用**:`risk_level` 复用 Phase 5 `RiskLevel`(LOW / MEDIUM / HIGH / CRITICAL),以 `String(20)` 存储,与 `approval_requests` 一致,不定义第二套枚举。
 - **边界**:退款资格、金额、换货、风控分级、人工审批与 LLM 摘要留给后续 9B~9E;本层只负责案件数据本身。Service 拒绝非法枚举值 / risk level / JSON 载荷。
+
+## 25. After-Sales Case Agent Integration(Phase 9B 落地)
+
+```text
+POST /api/v1/demo/chat
+  -> AgentWorkflow.execute
+       UNDERSTAND
+       -> CLASSIFY_INTENT
+       -> CASE_MANAGEMENT (只在意图为 UNSUPPORTED / AMBIGUOUS 时运行)
+            DeterministicAfterSalesCaseDetector -> AfterSalesSignal
+            AfterSalesCaseManager.handle(user_id, session_id, active_case_id, message, entities)
+              -> AfterSalesService (create_case / update_case)
+              -> collected_information / missing_information
+              -> INFORMATION_COLLECTION | ELIGIBILITY_CHECK
+       -> ROUTE (既有 RAG / *TOOL / CLARIFY / ESCALATE 分支完全不变)
+  -> _with_llm_response -> build_run_payload(含 case 字段) -> DemoRunStore
+```
+
+- **门控规则**:Case 管理步骤只在既有分类器无法处理的意图(`UNSUPPORTED` / `AMBIGUOUS`)上运行,这样 RAG / Order / Logistics / Cancel / Refund / Ticket 的既有 intent -> route 行为与执行逻辑完全不变(Decision 044)。售后处理请求("我的耳机坏了")此前正是 UNSUPPORTED -> ESCALATE 的一类。
+- **识别规则(确定性)**:`is_case_request` = 命中质量 / 物流争议类问题标记,或换货 / 维修诉求标记;单独的退款短语不算案件请求(退款请求继续走既有 REFUND_REQUEST 流程)。明确要求转人工的消息仍走 ESCALATE,不建案件。
+- **信息收集规则**:三项信息分别判定 - `order_id`(用户是否给出订单引用)、`requested_action`(换货 / 维修 / 退款,`UNKNOWN` 视为缺失)、`problem_description`(是否真的描述过问题)。任一项缺失 -> `INFORMATION_COLLECTION` 并向用户追问缺失项;三项齐备 -> `ELIGIBILITY_CHECK`(本阶段只改状态,不执行资格判断)。
+- **业务事实边界**:`AfterSalesCase.order_id` 只在订单确实存在时写入(经 OrderRepository 解析);用户给出但系统中不存在的引用(如 `ORD-1004`)只保存为 `collected_information.order_ref`。LLM 输出至多是输入,永远不是业务事实。
+- **编排边界**:`AfterSalesCaseManager` 只依赖 `AfterSalesService`;不调用 RefundService / RiskEngine / LLM / MCP,不执行任何写业务动作。Case Service 异常在 workflow 内被捕获并降级到确定性路径(聊天不中断、不返回 500)。
+- **Session 关联**:不新增数据库字段。demo 层用 `DemoRunStore` 中同一 session 最近一次带 case 的 run 作为 session -> case 的最小链接(进程内);复用前重新校验案件存在 / 归属用户 / 状态可继续(仅 `INFORMATION_COLLECTION` / `ELIGIBILITY_CHECK`)。
+- **展示层**:`build_run_payload` 增加 `case` 字段与 `Case Upsert` / `Information Collection` 时间线步骤;`build_text` 按 `missing_information` 生成确定性的追问或下一步说明,不经过 LLM,也不声称任何未执行的动作。

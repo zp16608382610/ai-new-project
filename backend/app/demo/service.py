@@ -32,6 +32,7 @@ from app.mcp.client import MCPClient
 from app.retrieval.pipeline import RetrievalPipeline
 from app.risk import RiskEngine
 from app.services.approval_service import ApprovalService
+from app.services.after_sales_case_manager import AfterSalesCaseManager
 from app.services.verification import BusinessVerifier
 from app.tools.executor import ToolExecutor
 from app.tools.handlers import build_default_registry
@@ -70,6 +71,8 @@ class DemoComponents:
         self.approvals = ApprovalService(session)
         self.verifier = BusinessVerifier(session)
         self.retrieval = RetrievalPipeline(session)
+        # Phase 9B: the agent's after-sales case upsert step (same DB session).
+        self.case_manager = AfterSalesCaseManager(session)
         self.workflow = AgentWorkflow(
             retrieval=self.retrieval,
             tool_executor=self.provider,
@@ -78,6 +81,7 @@ class DemoComponents:
             verifier=self.verifier,
             llm_intent=llm_intent,
             llm_responder=llm_responder,
+            case_manager=self.case_manager,
         )
         self.llm_provider_name = "DeepSeek" if llm_intent is not None else None
 
@@ -155,6 +159,28 @@ def _attach_llm_meta(payload: dict, enabled: bool) -> dict:
     return payload
 
 
+def _active_case_id_from_runs(store: DemoRunStore, session_id: str | None) -> str | None:
+    """The after-sales case this session was last working on (Phase 9B).
+
+    ``after_sales_cases`` has no session column (Phase 9A model), so the
+    in-process run store is the minimal session -> case link: the most recent
+    run of this session that carried a case block. The case manager re-validates
+    that the case still exists, belongs to the user and is still active before
+    continuing it.
+    """
+    if not session_id:
+        return None
+    try:
+        runs = list(store.list_session(session_id))
+    except Exception:
+        return None
+    for run in reversed(runs):
+        case = run.get("case")
+        if isinstance(case, dict) and case.get("case_id"):
+            return str(case["case_id"])
+    return None
+
+
 def run_chat(
     session: Session,
     store: DemoRunStore,
@@ -184,6 +210,7 @@ def run_chat(
     run_session = session_id or new_session_id()
     run_request = request_id or new_request_id()
     history = _history_from_runs(store, run_session)
+    active_case_id = _active_case_id_from_runs(store, run_session)
     state, result = components.workflow.execute(
         run_request,
         message,
@@ -191,6 +218,7 @@ def run_chat(
         session_id=run_session,
         user_confirmed=user_confirmed,
         history=history,
+        active_case_id=active_case_id,
     )
     approval_view = None
     if result.approval_id is not None:

@@ -21,6 +21,8 @@ from app.db.session import create_db_engine, create_session_factory, get_db
 from app.demo.demo_seed import prepare_demo_database
 from app.demo.store import get_store, reset_store
 from app.main import create_app
+from app.services.after_sales_case_manager import AfterSalesCaseManager
+from app.services.after_sales_service import AfterSalesService
 
 API = "/api/v1"
 
@@ -177,3 +179,72 @@ def test_cancel_short_order_ref_ord2_reaches_confirmation(demo_api, monkeypatch)
     order = session.get(Order, 2)
     assert order is not None
     assert order.status.value != "CANCELLED"
+
+
+# ---------------------------------------------------------------------------
+# Phase 9B: after-sales case management over the real HTTP + workflow path
+# ---------------------------------------------------------------------------
+
+
+def test_after_sales_case_multi_turn_api(demo_api):
+    """The objective's two-turn information-collection example, end to end."""
+    client, session = demo_api
+    first = _chat(client, "我的耳机坏了，帮我处理一下。")
+
+    assert first["intent"] == "AFTER_SALES_REQUEST"
+    assert first["route"] == "AFTER_SALES_CASE"
+    assert first["agent_status"] == "needs_clarification"
+    case = first["case"]
+    assert case["case_id"].startswith("CASE-")
+    assert case["created"] is True
+    assert case["case_type"] == "QUALITY_ISSUE"
+    assert case["requested_action"] == "UNKNOWN"
+    assert case["problem_description"] == "我的耳机坏了"
+    assert case["status"] == "INFORMATION_COLLECTION"
+    assert case["missing_information"] == ["order_id", "requested_action"]
+    assert first["text"] == (
+        "可以帮你处理售后。请先提供对应的订单号，并告诉我是希望退款、换货还是维修。"
+    )
+    labels = [step["label"] for step in first["steps"]]
+    assert "Case Upsert" in labels
+    assert "Information Collection" in labels
+
+    second = _chat(client, "订单是 ORD-1004，我想换货。")
+
+    updated = second["case"]
+    assert updated["case_id"] == case["case_id"]
+    assert updated["created"] is False
+    assert updated["order_ref"] == "ORD-1004"
+    assert updated["requested_action"] == "EXCHANGE"
+    assert updated["status"] == "ELIGIBILITY_CHECK"
+    assert updated["missing_information"] == []
+    assert second["text"] == (
+        "已获取订单 ORD-1004 和换货诉求，接下来可以检查该订单是否符合换货条件。"
+    )
+    # Phase 9B manages case state only: one case, no business write.
+    assert len(AfterSalesService(session).list_cases(user_id=1)) == 1
+
+
+def test_non_after_sales_chat_has_no_case(demo_api):
+    client, session = demo_api
+    run = _chat(client, "帮我写一份 Python 教程")
+
+    assert run["case"] is None
+    assert run["intent"] == "UNSUPPORTED"
+    assert run["route"] == "ESCALATE"
+    assert AfterSalesService(session).list_cases() == []
+
+
+def test_case_service_failure_keeps_chat_working(demo_api, monkeypatch):
+    client, session = demo_api
+
+    def boom(self, **kwargs):  # noqa: ANN001 - test stub
+        raise RuntimeError("case service down")
+
+    monkeypatch.setattr(AfterSalesCaseManager, "handle", boom)
+    run = _chat(client, "我的耳机坏了，帮我处理一下。")
+
+    assert run["route"] == "ESCALATE"
+    assert run["case"] is None
+    assert run["text"].strip()
+    assert AfterSalesService(session).list_cases() == []

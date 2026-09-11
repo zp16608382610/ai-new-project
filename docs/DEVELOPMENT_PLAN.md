@@ -23,6 +23,9 @@
 
 - **Phase 7C — Evaluation + Observability + Final Demo Packaging:completed**(固定数据集评测 + 单机 Trace + Final Demo 打包已落地;规模化评测 / 生产级可观测基座保留至 Phase 8)
 - **Phase 8 — Evaluation + Observability(规模化 / 生产级):not started**
+- **Phase 9A — After-Sales Domain Model:completed**(售后案件领域模型,不接入 Agent)
+- **Phase 9B — After-Sales Case Agent Integration:completed**(Agent 识别售后处理请求并创建 / 更新 Case,完成基础信息收集;不执行退款 / 换货 / 维修)
+- **Phase 9C 及以后 — 售后资格校验 / 执行:not started**
 - **Phase 9 — Final Demo(现场彩排 / 验收 / 收尾):not started**
 
 ## Phase 1 — Foundation [COMPLETED]
@@ -238,3 +241,20 @@
 - **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 043、ARCHITECTURE.md §24。
 
 说明：Phase 9A 停在领域模型，不进入 Phase 9B；`after_sales_cases` 目前尚无任何 Agent / Tool 写入路径。
+
+## Phase 9B — After-Sales Case Agent Integration [COMPLETED]
+
+已完成 Phase 9B：让现有 Agent 能够识别「售后处理请求」，创建 / 持续更新 `AfterSalesCase`，并完成基础信息收集。本阶段只做案件管理，不真正执行退款 / 换货 / 维修，不接入 LLM 决策，也不修改既有业务动作（RAG / Tool Executor / MCP / Risk Gate / HITL / Execute / Verify）的执行逻辑。
+
+- **新增调用链**：`Understand → Case Upsert → Information Collection → Route`。Case 步骤只在既有管线无法处理的意图（`UNSUPPORTED` / `AMBIGUOUS`）上运行，因此 RAG / Order / Logistics / Cancel / Refund / Ticket 的既有 intent→route 行为完全不变。
+- **判定层**：`backend/app/agent/after_sales.py`（纯领域逻辑，无 SQLAlchemy、无 LLM）。`DeterministicAfterSalesCaseDetector` 用确定性规则产出 `AfterSalesSignal`：`case_type`（质量 / 物流争议 / 其他）、`requested_action`（换货 > 维修 > 退款 优先）、`problem_statement`（含问题标记的从句，如「我的耳机坏了，帮我处理一下。」→「我的耳机坏了」）、`is_case_request`。明确要求转人工的消息不属于售后案件，仍走既有 ESCALATE。
+- **编排层**：`backend/app/services/after_sales_case_manager.py`，只使用 `AfterSalesService`（不调用 RefundService / RiskEngine / LLM / MCP）。同一 session 的 active case（仅 `INFORMATION_COLLECTION` / `ELIGIBILITY_CHECK`）会被继续更新而不是重复创建；已 `COMPLETED` / `REJECTED` 的案件不会被复用。合并多轮信息后计算 `collected_information` / `missing_information`，缺失为空时进入 `ELIGIBILITY_CHECK`（本阶段不真正执行资格判断）。
+- **业务事实边界**：`order_id`（orders 外键）只在订单确实存在时写入；用户给出但系统中不存在的引用（例如 `ORD-1004`）只作为字符串保存在 `collected_information.order_ref`，绝不升级为业务事实。
+- **Agent 契约**：`AgentState.after_sales_case` / `AgentResult.after_sales_case` 承载结构化案件；`Intent.AFTER_SALES_REQUEST`、`Route.AFTER_SALES_CASE`、`WorkflowStage.CASE_MANAGEMENT` 加入领域词表。Case Service 异常只记日志并回落到确定性路径（不返回 500，不破坏聊天流程）。
+- **Session 关联**：不新增数据库字段。demo 进程内 `DemoRunStore` 用「同一 session 最近一次带 case 的 run」作为 session→case 的最小链接；`AfterSalesCaseManager` 复用前会重新校验案件存在 / 归属用户 / 状态可继续。
+- **用户可见回复**（demo 层 `build_text`，确定性、不经过 LLM）：信息不足时按缺失项追问（「可以帮你处理售后。请先提供对应的订单号，并告诉我是希望退款、换货还是维修。」）；信息完整时只说明下一步，不执行（「已获取订单 ORD-1004 和换货诉求，接下来可以检查该订单是否符合换货条件。」）。
+- **前端**：无需修改；`/demo/chat` payload 新增 `case` 字段与 `Case Upsert` / `Information Collection` 时间线步骤。
+- **测试**：新增 33 例（`tests/test_after_sales_agent.py` 30 例 + `tests/test_demo_api.py` 3 例真实 HTTP 链路），覆盖创建案件 / 不重复创建 / 已完成案件不复用 / 订单号与诉求提取 / 案件类型映射 / 缺信息回到信息收集 / 信息完整进入 ELIGIBILITY_CHECK / 多轮更新同一案件 / 跨用户隔离 / 非售后请求不建案 / LLM 畸形输出不产生危险动作 / Case Service 故障不破坏聊天 / 序列化契约。全量 **445 例**通过（412 → 445，无回归），backend `compileall` 通过。
+- **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 044、ARCHITECTURE.md §25。
+
+说明：Phase 9B 只做案件管理，不进入 Phase 9C；`AfterSalesCase` 目前仍不触发任何退款 / 换货 / 维修执行。

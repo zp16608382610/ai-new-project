@@ -23,10 +23,12 @@ Design decisions:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
+from app.agent.after_sales import AfterSalesCaseManagerLike, AfterSalesCaseOutcome
 from app.agent.entities import DeterministicEntityExtractor, EntityExtractor, ExtractedEntities
 from app.agent.intent import (
     DeterministicIntentClassifier,
@@ -38,6 +40,7 @@ from app.agent.state import (
     AgentResultStatus,
     AgentRunStatus,
     AgentState,
+    Intent,
     Route,
     ToolRequest,
     ToolRequestStatus,
@@ -49,6 +52,9 @@ if TYPE_CHECKING:
 
 from app.risk.types import RiskAction, RiskContext, RiskDecision
 from app.tools.base import ToolExecutionContext, ToolResult, ToolResultStatus
+
+logger = logging.getLogger(__name__)
+
 
 class RetrievalRunner(Protocol):
     """Existing RAG pipeline entry point used by the RAG branch.
@@ -184,6 +190,7 @@ class AgentWorkflow:
         verifier: ToolVerifierLike | None = None,
         llm_intent: 'LLMIntentExtractor | None' = None,
         llm_responder: 'FinalResponder | None' = None,
+        case_manager: AfterSalesCaseManagerLike | None = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
@@ -195,6 +202,7 @@ class AgentWorkflow:
         self._verifier = verifier
         self._llm_intent = llm_intent
         self._llm_responder = llm_responder
+        self._case_manager = case_manager
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -227,6 +235,10 @@ class AgentWorkflow:
     def verifier(self) -> ToolVerifierLike | None:
         return self._verifier
 
+    @property
+    def case_manager(self) -> AfterSalesCaseManagerLike | None:
+        return self._case_manager
+
 
     def run(
         self,
@@ -237,6 +249,7 @@ class AgentWorkflow:
         session_id: str | None = None,
         user_confirmed: bool | None = None,
         history: list[dict[str, str]] | None = None,
+        active_case_id: str | None = None,
     ) -> AgentResult:
         """Run the workflow and return the Response State (AgentResult)."""
         _, result = self.execute(
@@ -246,6 +259,7 @@ class AgentWorkflow:
             session_id=session_id,
             user_confirmed=user_confirmed,
             history=history,
+            active_case_id=active_case_id,
         )
         return result
 
@@ -258,6 +272,7 @@ class AgentWorkflow:
         session_id: str | None = None,
         user_confirmed: bool | None = None,
         history: list[dict[str, str]] | None = None,
+        active_case_id: str | None = None,
     ) -> tuple[AgentState, AgentResult]:
         """Run the workflow and return (AgentState, AgentResult).
 
@@ -274,7 +289,10 @@ class AgentWorkflow:
         )
         try:
             result = self._execute_inner(
-                state, user_confirmed=user_confirmed, history=history
+                state,
+                user_confirmed=user_confirmed,
+                history=history,
+                active_case_id=active_case_id,
             )
             result = self._with_llm_response(state, result, history=history)
         except Exception as exc:  # defensive error boundary; never fabricate success
@@ -304,6 +322,7 @@ class AgentWorkflow:
         *,
         user_confirmed: bool | None = None,
         history: list[dict[str, str]] | None = None,
+        active_case_id: str | None = None,
     ) -> AgentResult:
         state.status = WorkflowStage.UNDERSTAND
         proposal: LLMIntentProposal | None = None
@@ -320,6 +339,17 @@ class AgentWorkflow:
             intent_result = self._classifier.classify(state.user_message)
             state.intent = intent_result.intent
             state.intent_confidence = intent_result.confidence
+
+        # Phase 9B: after-sales case upsert. Gated on the intents the existing
+        # pipeline cannot handle, so every existing intent -> route behaviour
+        # (RAG / Order / Logistics / Cancel / Refund / Ticket) is untouched.
+        if self._case_manager is not None and state.intent in (
+            Intent.UNSUPPORTED,
+            Intent.AMBIGUOUS,
+        ):
+            case_result = self._run_case_management(state, active_case_id=active_case_id)
+            if case_result is not None:
+                return case_result
 
         state.status = WorkflowStage.ROUTE
         decision = self._router.decide(
@@ -351,6 +381,51 @@ class AgentWorkflow:
                 escalation_required=True,
             )
         raise RuntimeError(f"Unhandled route: {decision.route}")
+
+    def _run_case_management(
+        self, state: AgentState, *, active_case_id: str | None = None
+    ) -> AgentResult | None:
+        """Phase 9B Case Upsert + Information Collection step.
+
+        Returns None when the message is not an after-sales case request (the
+        workflow then continues on its normal path) or when the case service
+        fails - a case-service error must never break the chat flow, so it is
+        logged and the deterministic path wins.
+        """
+        state.status = WorkflowStage.CASE_MANAGEMENT
+        try:
+            outcome: AfterSalesCaseOutcome | None = self._case_manager.handle(
+                user_id=state.user_id,
+                session_id=state.session_id,
+                user_message=state.user_message,
+                entities=state.entities,
+                active_case_id=active_case_id,
+            )
+        except Exception as exc:  # guarded boundary: chat must keep working
+            logger.warning("after-sales case management failed: %s", type(exc).__name__)
+            return None
+        if outcome is None:
+            return None
+
+        case = outcome.to_dict()
+        state.after_sales_case = case
+        state.intent = Intent.AFTER_SALES_REQUEST
+        state.route = Route.AFTER_SALES_CASE
+        if outcome.needs_information:
+            return AgentResult(
+                status=AgentResultStatus.NEEDS_CLARIFICATION,
+                intent=state.intent,
+                route=state.route,
+                needs_clarification=True,
+                after_sales_case=case,
+            )
+        return AgentResult(
+            status=AgentResultStatus.SUCCESS,
+            intent=state.intent,
+            route=state.route,
+            after_sales_case=case,
+        )
+
     @staticmethod
     def _merge_entities(
         proposal: LLMIntentProposal | None,

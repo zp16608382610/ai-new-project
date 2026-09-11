@@ -64,6 +64,35 @@ _ACTION_LABEL = {
     RiskAction.BLOCK.value: "已拦截",
 }
 
+# Phase 9B after-sales case vocabulary (demo presentation only).
+_CASE_TYPE_LABEL = {
+    "QUALITY_ISSUE": "质量问题",
+    "LOGISTICS_DISPUTE": "物流争议",
+    "OTHER": "其他售后",
+}
+
+_CASE_STATUS_LABEL = {
+    "INFORMATION_COLLECTION": "信息收集中",
+    "ELIGIBILITY_CHECK": "待资格校验",
+    "PROCESSING": "处理中",
+    "PENDING_HUMAN": "待人工处理",
+    "COMPLETED": "已完成",
+    "REJECTED": "已拒绝",
+}
+
+_CASE_ACTION_LABEL = {
+    "REFUND": "退款",
+    "EXCHANGE": "换货",
+    "REPAIR": "维修",
+    "UNKNOWN": "售后",
+}
+
+_MISSING_LABEL = {
+    "order_id": "订单号",
+    "requested_action": "售后诉求",
+    "problem_description": "问题描述",
+}
+
 
 def zh_label(value: str | None, fallback: str = "") -> str:
     if not value:
@@ -120,6 +149,44 @@ def _source_items(package: ContextPackage | None) -> list[JsonDict]:
             }
         )
     return items
+
+
+def _case_ref(case: JsonDict) -> str:
+    """Render the user-given order reference (or the resolved id) as ORD-<id>."""
+    ref = case.get("order_ref")
+    if ref:
+        text = str(ref).strip()
+        return text.upper() if text.upper().startswith("ORD") else f"ORD-{text}"
+    if case.get("order_id") is not None:
+        return f"ORD-{case['order_id']}"
+    return ""
+
+
+def _case_timeline_steps(case: JsonDict) -> list[JsonDict]:
+    """Phase 9B timeline: Case Upsert -> Information Collection."""
+    steps: list[JsonDict] = [
+        {
+            "label": "Case Upsert",
+            "state": "success",
+            "detail": (
+                f"{case.get('case_id')} · "
+                f"{_CASE_TYPE_LABEL.get(str(case.get('case_type')), case.get('case_type'))} · "
+                f"{_CASE_STATUS_LABEL.get(str(case.get('status')), case.get('status'))}"
+                + ("（新建）" if case.get("created") else "（更新）")
+            ),
+        }
+    ]
+    missing = [str(item) for item in (case.get("missing_information") or [])]
+    if missing:
+        steps.append(
+            {
+                "label": "Information Collection",
+                "state": "pending",
+                "detail": "缺少:"
+                + "、".join(_MISSING_LABEL.get(item, item) for item in missing),
+            }
+        )
+    return steps
 
 
 def _risk_decision_dict(decision: RiskDecision) -> JsonDict:
@@ -262,6 +329,9 @@ def _build_timeline(
                 "detail": f"Intent: {intent_value}",
             }
         )
+    case = state.after_sales_case
+    if isinstance(case, dict) and case.get("case_id"):
+        steps.extend(_case_timeline_steps(case))
     route_value = result.route.value if result.route else (state.route.value if state.route else None)
     if route_value:
         steps.append({"label": "Route", "state": "success", "detail": f"Route: {route_value}"})
@@ -439,6 +509,8 @@ def build_run_payload(
     """Build the Chat/Console JSON payload for one workflow execution."""
     package = state.retrieved_context
     sources = _source_items(package)
+    # Phase 9B: after-sales case created/updated by this run (None otherwise).
+    case_block = state.after_sales_case or result.after_sales_case
 
     risk: JsonDict | None = None
     approval_block: JsonDict | None = None
@@ -525,6 +597,7 @@ def build_run_payload(
         "steps": _build_timeline(state, result, approval=approval_view, resolution=resolution),
         "risk": risk,
         "approval": approval_block,
+        "case": case_block,
         "expected_refund": {"amount": expected_amount, "order_ref": expected_refund_order}
         if expected_amount is not None
         else None,
@@ -559,6 +632,10 @@ def build_text(
     intent = result.intent.value if result.intent else (state.intent.value if state.intent else None)
     route = result.route.value if result.route else (state.route.value if state.route else None)
     status = result.status.value
+
+    case = state.after_sales_case or result.after_sales_case
+    if isinstance(case, dict) and case.get("case_id"):
+        return _case_text(case)
 
     if status in (AgentResultStatus.WAITING_USER_CONFIRMATION.value,):
         return result.confirmation_message or "该操作需要您确认后才能执行,请确认是否继续?"
@@ -607,6 +684,35 @@ def build_text(
     if tool.get("status") != ToolResultStatus.SUCCESS.value:
         return f"处理失败:{tool.get('error_message') or tool.get('status')}"
     return _final_text_from_tool(str(tool.get("tool_name")), dict(tool.get("data") or {}), resolution)
+
+
+def _case_text(case: JsonDict) -> str:
+    """Deterministic Phase 9B reply for the after-sales case branch.
+
+    Information collection asks only for what is really missing; a complete
+    case states the next step (eligibility check) without performing it.
+    """
+    missing = [str(item) for item in (case.get("missing_information") or [])]
+    if missing:
+        asks: list[str] = []
+        if "order_id" in missing:
+            asks.append("提供对应的订单号")
+        if "requested_action" in missing:
+            asks.append("告诉我是希望退款、换货还是维修")
+        if "problem_description" in missing:
+            asks.append("描述一下具体的问题")
+        if not asks:
+            asks.append("补充相关信息")
+        return "可以帮你处理售后。请先" + "，并".join(asks) + "。"
+
+    action = _CASE_ACTION_LABEL.get(str(case.get("requested_action") or ""), "售后")
+    ref = _case_ref(case)
+    if ref:
+        return (
+            f"已获取订单 {ref} 和{action}诉求，"
+            f"接下来可以检查该订单是否符合{action}条件。"
+        )
+    return f"已获取{action}诉求，接下来可以进行后续处理。"
 
 
 def approval_block_order(approval_view: ApprovalView) -> str:

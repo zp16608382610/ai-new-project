@@ -512,3 +512,18 @@ Phase 9 新增独立的 `AfterSalesCase`（表 `after_sales_cases`）承载一�
 
 **Reason:**
 `Ticket` 的语义是「人对人的工单」——分类 + 优先级 + 处理状态；售后案件需要独立的流程状态机（INFORMATION_COLLECTION → ELIGIBILITY_CHECK → PROCESSING → PENDING_HUMAN / COMPLETED / REJECTED）、结构化的已收集与缺失信息，以及转人工时使用的 AI 摘要。复用 Ticket 会让一张表承担两种生命周期，并让后续 9B~9E 的 Agent / 工具写入路径与人工工单互相污染。独立表同时避免修改既有订单 / 退款 / 工单逻辑，符合本阶段「最小兼容修改」约束。
+
+## Decision 044 — AfterSalesCase 是售后任务的持久化业务对象;LLM 只提供结构化提议
+
+**Decision:**
+AfterSalesCase 是售后任务的持久化业务对象;LLM（或确定性 NLU）负责从自然语言中提出结构化信息（案件类型 / 诉求 / 问题描述），但业务事实由 Business System 提供，Case Service 不直接执行退款 / 换货 / 维修。
+同时：Agent 的 Case 管理步骤只在既有意图管线无法处理的意图（`UNSUPPORTED` / `AMBIGUOUS`）上运行，保证 RAG / Order / Logistics / Cancel / Refund / Ticket 的既有行为不变。
+
+**Reason:**
+售后任务的生命周期（信息收集 → 资格校验 → 处理 → 完成 / 拒绝 / 转人工）比一次问答长得多，需要跨轮次持久化，因此用独立的 `AfterSalesCase` 承载，而不是把状态放在会话内存或聊天记录里。
+
+把「用户说了什么」与「业务事实是什么」分开，是因为二者来源不同：用户或模型只能提供声明，例如「我好像是上周买的」「订单是 ORD-1004」，这些都不是订单的权威状态。订单是否存在、购买时间、金额、可退性必须来自 Business System。因此 Case 只把用户声明存进 `collected_information`，`order_id`（orders 外键）仅在订单确实存在时写入；系统中不存在的引用只保留为字符串，绝不升级为业务事实。
+
+Case Service 不调用 RefundService / RiskEngine / LLM / MCP，是为了保持领域边界：退款 / 换货 / 维修属于后续阶段的业务动作，必须各自经过既有的 Risk Gate 与 HITL，而不能被案件层直接触发。
+
+把 Case 步骤限制在 `UNSUPPORTED` / `AMBIGUOUS` 上，是 Phase 9B 的最小侵入策略：售后处理请求（如「我的耳机坏了」）当前会被判为 UNSUPPORTED 并转人工，正是需要接管的一类；而已经能处理的意图保持原样，避免案件层劫持既有业务动作。
