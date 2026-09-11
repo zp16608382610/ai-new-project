@@ -271,6 +271,7 @@ def test_eligible_case_creates_one_ticket(db_session):
     assert outcome.ticket["ref"] == f"TICKET-{outcome.ticket['id']}"
     assert outcome.ticket["priority"] == TicketPriority.MEDIUM.value
     assert outcome.ticket["count"] == 1
+    assert outcome.treatment["ticket_id"] == outcome.ticket["id"]
     assert len(_tickets_of(db_session, case.case_id)) == 1
 
 
@@ -289,6 +290,7 @@ def test_case_and_ticket_are_linked(db_session):
     assert row.order_id == 1003
     stored = (view.collected_information or {})["treatment_plan"]
     assert stored["ticket"]["id"] == row.id
+    assert stored["ticket_id"] == row.id
     assert stored["ticket_registered"] is True
     assert stored["case_id"] == case.case_id
 
@@ -325,6 +327,7 @@ def test_ticket_creation_failure_is_reported_not_hidden(db_session, monkeypatch)
 
     assert outcome.ticket is None
     assert outcome.ticket_created is False
+    assert outcome.treatment["ticket_id"] is None
     assert outcome.error is not None and "ticket backend down" in outcome.error
     assert _tickets_of(db_session, case.case_id) == []
     view = AfterSalesService(db_session).get_case(case.case_id)
@@ -333,6 +336,7 @@ def test_ticket_creation_failure_is_reported_not_hidden(db_session, monkeypatch)
     stored = (view.collected_information or {})["treatment_plan"]
     assert stored["ticket_registered"] is False
     assert stored["ticket"] is None
+    assert stored["ticket_id"] is None
     assert "ticket backend down" in stored["ticket_error"]
 
 
@@ -348,6 +352,8 @@ def test_ticket_creation_is_idempotent(db_session):
     assert second.ticket_created is False
     assert third.ticket_created is False
     assert second.ticket["id"] == first.ticket["id"]
+    assert second.treatment["ticket_id"] == first.ticket["id"]
+    assert third.treatment["ticket_id"] == first.ticket["id"]
     assert third.ticket["count"] == 1
     assert len(_tickets_of(db_session, case.case_id)) == 1
 
@@ -386,6 +392,7 @@ def test_workflow_plans_treatment_and_creates_the_ticket(db_session):
     assert treatment["required_next_step"] == "等待后续换货执行"
     ticket = result.after_sales_ticket
     assert ticket["id"] is not None and ticket["created"] is True
+    assert treatment["ticket_id"] == ticket["id"]
     assert state.after_sales_ticket["id"] == ticket["id"]
     assert WorkflowStage.CASE_TREATMENT.value in [s.value for s in WorkflowStage]
 
@@ -602,6 +609,8 @@ def test_ticket_creation_cannot_bypass_eligibility(db_session):
 
     assert rejected.ticket is None and rejected.ticket_created is False
     assert inconclusive.ticket is None and inconclusive.ticket_created is False
+    assert rejected.treatment["ticket_id"] is None
+    assert inconclusive.treatment["ticket_id"] is None
     assert _tickets_of(db_session, case.case_id) == []
     assert (rejected.treatment["action"] or NO_ACTION) == NO_ACTION
     assert (inconclusive.treatment["action"] or NO_ACTION) == NO_ACTION

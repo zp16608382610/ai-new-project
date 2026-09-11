@@ -258,3 +258,21 @@ def test_evaluation_never_triggers_a_business_write_for_after_sales():
         assert row["actual"]["execution_triggered"] is False, row["case_id"]
         assert row["actual"]["execution_success"] is None, row["case_id"]
         assert row["status"] == "PASS", row["case_id"]
+
+
+def test_full_dataset_is_green_and_order_independent():
+    """Every case runs against its own database, so no case leaks state.
+
+    Regression guard: running the refund cases leaves an in-flight refund for
+    ORD-1003, which used to reject every later ORD-1003 after-sales case with
+    `no_active_refund` when the whole dataset shared one database.
+    """
+    report = run_evaluation(use_llm=False)
+
+    assert report["total_cases"] == len(get_dataset())
+    failures = [
+        (row["case_id"], row["failure_reasons"])
+        for row in report["cases"]
+        if row["status"] != "PASS"
+    ]
+    assert report["failed"] == 0, failures

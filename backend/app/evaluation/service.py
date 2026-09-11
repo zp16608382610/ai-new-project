@@ -44,28 +44,29 @@ def run_evaluation(
     from app.demo.store import DemoRunStore
     from app.db.session import create_db_engine, create_session_factory
 
-    own_path: str | None = None
-    url = database_url
-    if url is None:
-        url, own_path = _default_database_url()
-    prepare_demo_database(url)
-    engine = create_db_engine(url)
-    session = create_session_factory(engine)()
     cases = get_dataset(case_ids)
 
     case_results: list[dict[str, Any]] = []
-    try:
+    if database_url is None:
+        # Phase 9D: every case gets its own throw-away database. Cases are not
+        # independent when they share one DB (e.g. the refund cases leave an
+        # in-flight refund for ORD-1003, which then trips `no_active_refund`
+        # for unrelated after-sales cases). Isolating per case keeps every
+        # case deterministic and order-independent.
         for case in cases:
-            result = _run_case(session, case, use_llm=use_llm)
-            case_results.append(result)
-    finally:
-        session.close()
-        engine.dispose()
-        if own_path is not None:
-            try:
-                os.unlink(own_path)
-            except OSError:
-                pass
+            case_results.append(_run_case_isolated(case, use_llm=use_llm))
+    else:
+        # Caller pinned an explicit database: run the whole set against it
+        # (the caller owns that DB's lifecycle).
+        prepare_demo_database(database_url)
+        engine = create_db_engine(database_url)
+        session = create_session_factory(engine)()
+        try:
+            for case in cases:
+                case_results.append(_run_case(session, case, use_llm=use_llm))
+        finally:
+            session.close()
+            engine.dispose()
 
     summary = summarize(case_results)
     return {
@@ -80,6 +81,28 @@ def run_evaluation(
         "metrics": summary["metrics"],
         "cases": case_results,
     }
+
+
+def _run_case_isolated(case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]:
+    """Run one case against its own freshly seeded, disposable SQLite file."""
+    from app.db.session import create_db_engine, create_session_factory
+    from app.demo.demo_seed import prepare_demo_database
+
+    url, path = _default_database_url()
+    try:
+        prepare_demo_database(url)
+        engine = create_db_engine(url)
+        session = create_session_factory(engine)()
+        try:
+            return _run_case(session, case, use_llm=use_llm)
+        finally:
+            session.close()
+            engine.dispose()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]:

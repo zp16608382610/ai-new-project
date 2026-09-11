@@ -141,6 +141,9 @@ class TreatmentPlan:
     requires_execution: bool = False
     requires_human_review: bool = False
     executable: bool = False
+    # Set once the after-sales ticket really exists; stays None when nothing
+    # was registered (not eligible / no action / creation failed).
+    ticket_id: int | None = None
     ticket_category: str = TICKET_CATEGORY_AFTER_SALES
     policy_citations: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
@@ -159,6 +162,7 @@ class TreatmentPlan:
             "requires_execution": self.requires_execution,
             "requires_human_review": self.requires_human_review,
             "executable": self.executable,
+            "ticket_id": self.ticket_id,
             "ticket_category": self.ticket_category,
             "policy_citations": list(self.policy_citations),
             "notes": list(self.notes),

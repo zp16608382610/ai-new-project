@@ -606,7 +606,7 @@ HTTP / Chat
 
 ### 27.3 TreatmentPlan 与状态语义
 
-- 字段:`action` / `reason` / `case_id` / `case_status` / `case_type` / `order_id` / `order_ref` / `required_next_step` / `requires_execution` / `requires_human_review` / `executable` / `ticket_category` / `policy_citations`。
+- 字段:`action` / `reason` / `case_id` / `case_status` / `case_type` / `order_id` / `order_ref` / `required_next_step` / `requires_execution` / `requires_human_review` / `executable` / `ticket_id`(工单创建成功后的 Ticket ID,未创建为 `null`) / `ticket_category` / `policy_citations`。
 - `action ∈ {REFUND, EXCHANGE, REPAIR}` 且必须等于 `case.requested_action`;否则 `action=None`、`executable=False`、`requires_human_review=True`(Decision 047)。
 - 案件状态语义不变:`PROCESSING` = 「售后处理任务已建立,可以进入后续执行」;**不是** `COMPLETED`(真正的业务变更尚未发生)。
 - 处理方案存放于 `after_sales_cases.collected_information["treatment_plan"]`(含 ticket 块与 `ticket_registered` / `ticket_error`),复用既有 JSON 列,不新建第二张表。
@@ -619,7 +619,7 @@ HTTP / Chat
 
 ### 27.5 Demo 与 Observability
 
-`/api/v1/demo/chat` payload 新增 `treatment` / `ticket`;timeline 复用既有机制,在 `Eligibility Check` 之后新增 `Treatment Plan` / `Ticket Creation` 两个步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status,前端无需改动。售后时效按真实时钟判定(seed 签收时间固定,线上 demo 可能得到 `REJECTED`),脚本化 demo / 评测可通过可选 `reference_time` 固定窗口。
+`/api/v1/demo/chat` payload 新增 `treatment` / `ticket`;timeline 复用既有机制,在 `Eligibility Check` 之后新增 `Treatment Plan` / `Ticket Creation` 两个步骤,`/chat` 可见 Case ID / Eligibility / Treatment Action / Ticket ID / Case status,前端无需改动。售后时效按真实时钟判定(seed 签收时间固定,线上 demo 可能得到 `REJECTED`),脚本化 demo / 评测可通过可选 `reference_time` 固定窗口。评测 runner 为**每个 case 单独准备一次性种子数据库**,避免跨 case 状态泄漏(共享 DB 时,退款 case 留下的在途退款会让后续 ORD-1003 售后 case 命中 `no_active_refund` 而误判 REJECTED)。
 
 ### 27.6 明确未实现
 

@@ -130,6 +130,9 @@ class AfterSalesTreatmentService:
         view = self.cases.get_case(case_id)
         collected = dict(view.collected_information or {})
         data = dict(plan.to_dict())
+        # The plan exposes the created ticket id at the top level (task field
+        # list) in addition to the nested ticket block.
+        data["ticket_id"] = ticket_block["id"] if ticket_block else None
         data["ticket"] = dict(ticket_block) if ticket_block else None
         data["ticket_registered"] = ticket_block is not None
         if error is not None:
