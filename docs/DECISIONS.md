@@ -504,3 +504,11 @@ The interview demo must be reproducible, explainable and honest: an isolated DB
 keeps evaluation writes out of the live demo data, N/A prevents fabricated
 scores, and the recorded risk-gate events make the decision chain auditable.
 Production-scale evaluation/tracing remains out of scope and is not claimed.
+
+## Decision 043 — 售后案件使用独立领域模型，而不是扩展 Ticket
+
+**Decision:**
+Phase 9 新增独立的 `AfterSalesCase`（表 `after_sales_cases`）承载一次完整售后处理案件，不把售后流程状态、已收集 / 缺失信息、AI 摘要塞进既有 `Ticket`。`risk_level` 复用 Phase 5 的 `RiskLevel` 词表并以 `String(20)` 存储（与 `approval_requests` 一致），`collected_information` / `missing_information` 使用 `sa.JSON`（SQLite 与 PostgreSQL 通用）。
+
+**Reason:**
+`Ticket` 的语义是「人对人的工单」——分类 + 优先级 + 处理状态；售后案件需要独立的流程状态机（INFORMATION_COLLECTION → ELIGIBILITY_CHECK → PROCESSING → PENDING_HUMAN / COMPLETED / REJECTED）、结构化的已收集与缺失信息，以及转人工时使用的 AI 摘要。复用 Ticket 会让一张表承担两种生命周期，并让后续 9B~9E 的 Agent / 工具写入路径与人工工单互相污染。独立表同时避免修改既有订单 / 退款 / 工单逻辑，符合本阶段「最小兼容修改」约束。

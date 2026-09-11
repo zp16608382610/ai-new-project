@@ -490,3 +490,18 @@ Request → Understand(Intent)→ Route → RAG / Tool / MCP
 - 每个 Agent 请求的 payload 即事件投影:`request_id / session_id / user_id / created_at / updated_at` + `steps`(Understand / Route / tool / Risk Gate / Human Approval / Execute / Verify / Finalize)+ `risk / approval / approval_resolution / sources / llm`。
 - AgentState 记录每次 Risk Gate 判定(`risk_decisions`),步骤带 status / summary / provider / result_data。
 - 边界:进程内存储、单 worker;禁止写入 API Key / Authorization / secret / 非必要个人信息;无分布式 tracing(保留 Phase 8)。
+
+## 24. After-Sales Domain Model(Phase 9A 落地)
+
+```text
+AfterSalesCase (售后案件;Phase 9A 只落地数据对象 + 最小 CRUD)
+  case_id / user_id / order_id(可空) / case_type / requested_action
+  problem_description / status / risk_level
+  collected_information(JSON) / missing_information(JSON) / ai_summary
+```
+
+- **定位**:一个 `AfterSalesCase` = 一次完整售后处理案件(从信息收集到完成 / 拒绝 / 转人工)。Phase 9A 只建立该数据对象与最小 CRUD(`create_case / get_case / update_case / list_cases`);不接入 Agent / Intent / RAG / Tool Executor / MCP / Risk Gate / HITL / 前端,不实现自动退款或自动换货。
+- **状态机**:`INFORMATION_COLLECTION → ELIGIBILITY_CHECK → PROCESSING → COMPLETED`;`PENDING_HUMAN` 表示转人工,`REJECTED` 表示终态(业务不允许)。
+- **与 Ticket 的区别**:`Ticket` 是「人对人的工单」(分类 / 优先级 / 处理状态);`AfterSalesCase` 承载 AI 参与的售后流程状态、结构化已收集 / 缺失信息与转人工摘要(Decision 043)。
+- **风控词表复用**:`risk_level` 复用 Phase 5 `RiskLevel`(LOW / MEDIUM / HIGH / CRITICAL),以 `String(20)` 存储,与 `approval_requests` 一致,不定义第二套枚举。
+- **边界**:退款资格、金额、换货、风控分级、人工审批与 LLM 摘要留给后续 9B~9E;本层只负责案件数据本身。Service 拒绝非法枚举值 / risk level / JSON 载荷。

@@ -9,11 +9,13 @@ from app.services.errors import (
     InvalidOperationError,
     NotFoundError,
 )
+from app.services.after_sales_service import AfterSalesService
 from app.services.order_service import OrderService
 from app.services.refund_service import RefundService
 from app.services.ticket_service import TicketService
 
 __all__ = [
+    "AfterSalesService",
     "BusinessError",
     "ConflictError",
     "InvalidOperationError",

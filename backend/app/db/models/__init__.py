@@ -8,6 +8,7 @@ from app.db.models.refund import Refund
 from app.db.models.approval import ApprovalRequest
 from app.db.models.ticket import Ticket
 from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from app.db.models.after_sales import AfterSalesCase
 
 __all__ = [
     "Base",
@@ -21,4 +22,5 @@ __all__ = [
     "Ticket",
     "KnowledgeChunk",
     "KnowledgeDocument",
+    "AfterSalesCase",
 ]

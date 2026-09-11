@@ -65,3 +65,35 @@ class ApprovalStatus(str, enum.Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+
+
+class AfterSalesCaseType(str, enum.Enum):
+    """Root-cause category of an after-sales case (Phase 9A)."""
+
+    QUALITY_ISSUE = "QUALITY_ISSUE"
+    LOGISTICS_DISPUTE = "LOGISTICS_DISPUTE"
+    OTHER = "OTHER"
+
+
+class AfterSalesRequestedAction(str, enum.Enum):
+    """What the customer asks the after-sales flow to do (Phase 9A)."""
+
+    REFUND = "REFUND"
+    EXCHANGE = "EXCHANGE"
+    REPAIR = "REPAIR"
+    UNKNOWN = "UNKNOWN"
+
+
+class AfterSalesCaseStatus(str, enum.Enum):
+    """Lifecycle of one after-sales case (Phase 9A).
+
+    INFORMATION_COLLECTION -> ELIGIBILITY_CHECK -> PROCESSING -> COMPLETED
+    PENDING_HUMAN is the hand-off state; REJECTED is a terminal "not allowed".
+    """
+
+    INFORMATION_COLLECTION = "INFORMATION_COLLECTION"
+    ELIGIBILITY_CHECK = "ELIGIBILITY_CHECK"
+    PROCESSING = "PROCESSING"
+    PENDING_HUMAN = "PENDING_HUMAN"
+    COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"

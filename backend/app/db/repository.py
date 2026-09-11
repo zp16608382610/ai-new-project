@@ -6,8 +6,17 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.enums import ApprovalStatus, KnowledgeCategory, KnowledgeStatus, OrderStatus, RefundStatus
+from app.db.enums import (
+    AfterSalesCaseStatus,
+    AfterSalesCaseType,
+    ApprovalStatus,
+    KnowledgeCategory,
+    KnowledgeStatus,
+    OrderStatus,
+    RefundStatus,
+)
 from app.db.models import (
+    AfterSalesCase,
     ApprovalRequest,
     KnowledgeChunk,
     KnowledgeDocument,
@@ -233,4 +242,33 @@ class ApprovalRepository(BaseRepository):
             .order_by(ApprovalRequest.id.desc())
             .limit(limit)
         )
+        return list(self._session.scalars(stmt))
+
+
+class AfterSalesCaseRepository(BaseRepository):
+    """Repository for after_sales_cases (Phase 9A)."""
+
+    model = AfterSalesCase
+
+    def get_by_case_id(self, case_id: str) -> AfterSalesCase | None:
+        stmt = select(AfterSalesCase).where(AfterSalesCase.case_id == case_id).limit(1)
+        return self._session.scalars(stmt).first()
+
+    def list_cases(
+        self,
+        *,
+        user_id: int | None = None,
+        status: AfterSalesCaseStatus | None = None,
+        case_type: AfterSalesCaseType | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AfterSalesCase]:
+        stmt = select(AfterSalesCase)
+        if user_id is not None:
+            stmt = stmt.where(AfterSalesCase.user_id == user_id)
+        if status is not None:
+            stmt = stmt.where(AfterSalesCase.status == status)
+        if case_type is not None:
+            stmt = stmt.where(AfterSalesCase.case_type == case_type)
+        stmt = stmt.order_by(AfterSalesCase.id).limit(limit).offset(offset)
         return list(self._session.scalars(stmt))

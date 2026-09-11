@@ -225,3 +225,16 @@
 - **前端 `/evaluation`**:真实运行评测并展示 Summary(Total / Passed / Failed)、7 项指标率与 Case Table(点击展开 Expected vs Actual)
 - **Final Demo Packaging**:docs/FINAL_DEMO.md(8 个固定演示场景 + 面试讲解点 + Known Limitations)
 - **测试**:新增 11 例(tests/test_evaluation.py 7 例 + tests/test_trace_events.py 4 例),全套 **391 例全绿**;backend `compileall` 通过;前端 `npm run build` 通过
+
+## Phase 9A — After-Sales Domain Model [COMPLETED]
+
+已完成 Phase 9A，只做「售后案件领域模型」：为后续 9B~9E 提供承载售后全过程的数据对象。本阶段不实现 AI 售后 Agent，不接入 AgentWorkflow / Intent Classifier / RAG / Tool Executor / MCP / Risk Gate / HITL / 前端，也不实现自动退款或自动换货。
+
+- **领域模型**：新增 `after_sales_cases` 表（`backend/app/db/models/after_sales.py`）。一个 `AfterSalesCase` = 一次完整售后处理案件：`case_id`（业务编号 `CASE-xxxxxxxxxxxx`，唯一）/ `user_id`（必填）/ `order_id`（可空：案件可先于订单识别产生）/ `case_type` / `requested_action` / `problem_description` / `status` / `risk_level` / `collected_information`(JSON) / `missing_information`(JSON list) / `ai_summary` / `created_at` / `updated_at`。
+- **枚举**：新增 `AfterSalesCaseType`(QUALITY_ISSUE / LOGISTICS_DISPUTE / OTHER)、`AfterSalesRequestedAction`(REFUND / EXCHANGE / REPAIR / UNKNOWN)、`AfterSalesCaseStatus`(INFORMATION_COLLECTION / ELIGIBILITY_CHECK / PROCESSING / PENDING_HUMAN / COMPLETED / REJECTED)。`risk_level` 直接复用 Phase 5 的 `RiskLevel`(LOW / MEDIUM / HIGH / CRITICAL)，按 `approval_requests.risk_level` 既有做法存 `String(20)`，不新建第二套冲突枚举（Decision 043）。
+- **迁移**：`backend/alembic/versions/4c7f9a1b2d3e_after_sales_cases.py`（`down_revision = 7a9c1e4b8d2f`）。SQLite / PostgreSQL 兼容（`native_enum=False + create_constraint=True`、`sa.JSON`）；不修改或删除任何既有表与字段，不影响既有 seed 与 demo.db。
+- **Service**：`backend/app/services/after_sales_service.py` 只提供 `create_case / get_case / update_case / list_cases`（返回 ORM-free 的 `AfterSalesCaseView`）。不做退款、不做换货、不做风控分级、不做 AI 决策、不调用 LLM；非法枚举 / risk level / JSON 载荷在 Service 层显式报错。
+- **测试**：新增 21 例（`tests/test_after_sales_case.py`），覆盖创建 / 查询 / 状态流转 / `collected_information` / `missing_information` / `ai_summary` / RiskLevel 兼容 / 非法输入拒绝 / 外键与枚举约束 / 既有 seed 不受影响 / 真实 Alembic 迁移链（`upgrade head` 幂等 + `downgrade` 回滚 + 重新 upgrade）。全量 **412 例**通过，backend `compileall` 通过。
+- **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 043、ARCHITECTURE.md §24。
+
+说明：Phase 9A 停在领域模型，不进入 Phase 9B；`after_sales_cases` 目前尚无任何 Agent / Tool 写入路径。
