@@ -902,6 +902,11 @@ class AgentWorkflow:
         evidence: dict[str, object] = {
             "knowledge": knowledge,
             "tools": [dict(item) for item in state.tool_results],
+            # Phase 9F: the workflow's own verdict (Risk Gate / execution /
+            # verification / pending approval / case status). Without it the
+            # model only sees a raw refund payload and has to guess what a
+            # PENDING refund row means.
+            "outcome": _llm_outcome_facts(state, result),
         }
         if not knowledge and not state.tool_results:
             return result
@@ -1291,6 +1296,7 @@ class AgentWorkflow:
                     "risk_level": view.risk_level,
                     "risk_action": RiskAction.HUMAN_APPROVAL.value,
                     "policy_id": "",
+                    "approval_id": approval_id,
                     "reason": view.reason or "Approved by human.",
                 },
             )
@@ -1474,6 +1480,60 @@ def _risk_decision_for(state: AgentState, tool_name: str) -> dict | None:
         if isinstance(item, dict) and str(item.get("tool")) == tool_name:
             return item
     return None
+
+
+def _llm_outcome_facts(state: AgentState, result: AgentResult) -> dict:
+    """Facts the workflow already decided, handed to the final-response LLM.
+
+    Phase 9F: the final response must not have to infer human-in-the-loop
+    facts from a raw tool payload (a refund row is PENDING because no money
+    moved, not because a human is still reviewing it). Every value here is
+    read from real state: the Risk Gate decision, the after-sales execution /
+    verification outcome, the pending approval and the case status. Nothing
+    is derived from model output and nothing is invented when unknown.
+    """
+    decisions = [
+        item for item in (state.risk_decisions or ()) if isinstance(item, dict)
+    ]
+    governing = decisions[-1] if decisions else None
+    execution = (
+        state.after_sales_execution
+        if isinstance(state.after_sales_execution, dict)
+        else None
+    )
+    verification = (
+        state.after_sales_verification
+        if isinstance(state.after_sales_verification, dict)
+        else None
+    )
+    case = state.after_sales_case if isinstance(state.after_sales_case, dict) else None
+
+    facts: dict = {
+        "approval_id": result.approval_id,
+        "approval_pending": result.approval_id is not None,
+    }
+    if governing is not None:
+        facts["risk_level"] = governing.get("risk_level")
+        facts["risk_action"] = governing.get("risk_action")
+        facts["risk_tool"] = governing.get("tool")
+        if str(governing.get("risk_action")) == RiskAction.HUMAN_APPROVAL.value:
+            # Resumed request: the approval is already resolved, so this run
+            # must never look like an automatic execution.
+            facts["resolved_approval_id"] = governing.get("approval_id")
+    if execution:
+        facts["execution_status"] = execution.get("status")
+        facts["refund_id"] = execution.get("refund_id")
+        facts["refund_amount"] = execution.get("refund_amount")
+    if verification:
+        facts["verification_passed"] = verification.get("passed")
+        facts["verification_checked"] = list(verification.get("checked") or [])
+    if case:
+        facts["case_status"] = case.get("status")
+    return {
+        key: value
+        for key, value in facts.items()
+        if value is not None or key in ("approval_id", "approval_pending")
+    }
 
 
 def _case_id_from_arguments(arguments: dict | None) -> str | None:

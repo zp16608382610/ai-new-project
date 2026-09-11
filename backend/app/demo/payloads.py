@@ -14,6 +14,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.agent.after_sales import (
+    EXECUTION_COMPLETED,
+    EXECUTION_FAILED,
+    EXECUTION_REJECTED,
+    EXECUTION_VERIFICATION_FAILED,
+)
 from app.agent.state import (
     AgentResult,
     AgentResultStatus,
@@ -114,10 +120,39 @@ def _ord_display(value: Any) -> str:
     return f"ORD-{text}"
 
 
+_TERMINAL_EXECUTION_STATUSES = frozenset(
+    {
+        EXECUTION_COMPLETED,
+        EXECUTION_REJECTED,
+        EXECUTION_VERIFICATION_FAILED,
+        EXECUTION_FAILED,
+    }
+)
+
+
+def _terminal_execution_verdict(state: AgentState) -> bool:
+    """True when the workflow already reached a final after-sales verdict.
+
+    Phase 9F: such a verdict (completed / rejected / verification failed /
+    failed) is an authoritative business conclusion and must not be reworded
+    by the LLM - the deterministic reply already states it exactly.
+    """
+    execution = state.after_sales_execution
+    if not isinstance(execution, dict):
+        return False
+    return str(execution.get("status") or "").upper() in _TERMINAL_EXECUTION_STATUSES
+
+
 def _refund_status_label(value: Any) -> str:
-    """Refund status label shown to users (PENDING == awaiting review)."""
+    """Refund status label shown to users (Phase 9F).
+
+    ``refunds.status = PENDING`` means the refund record exists but no money
+    has moved yet; it is NOT the human-approval state (that lives in
+    ``approval_requests.status``). Labelling it "待审核" made the model and the
+    UI conflate the two.
+    """
     if str(value).upper() == "PENDING":
-        return "\u5f85\u5ba1\u6838"  # awaiting review
+        return "处理中（等待资金处理，PENDING）"
     return zh_label(value)
 
 
@@ -756,6 +791,11 @@ def build_run_payload(
     # LLM is disabled or failed, result.response is None and the deterministic
     # text stays - the demo never fabricates an LLM answer.
     llm_text = result.response or state.response
+    # Phase 9F: never let the LLM reword a terminal execution verdict (e.g.
+    # turn a completed, verified auto-execution into "waiting for human
+    # review"). The deterministic reply distinguishes the outcomes already.
+    if llm_text and _terminal_execution_verdict(state):
+        llm_text = None
     text = llm_text if llm_text else build_text(
         state, result, approval_view=approval_view, resolution=resolution
     )
