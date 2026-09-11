@@ -27,7 +27,8 @@
 - **Phase 9B — After-Sales Case Agent Integration:completed**(Agent 识别售后处理请求并创建 / 更新 Case,完成基础信息收集;不执行退款 / 换货 / 维修)
 - **Phase 9C — After-Sales Investigation + Eligibility:completed**(ELIGIBILITY_CHECK 案件自动完成 Order / Policy 调查并由确定性 Eligibility Engine 给出资格判定;不执行退款 / 换货 / 维修)
 - **Phase 9D — After-Sales Treatment Plan + Ticket Creation:completed**(eligible=true 的案件生成确定性处理方案并创建 / 复用售后工单;不执行任何业务动作)
-- **Phase 9E 及以后 — 售后执行(退款 / 换货 / 维修)、真实 Embedding / pgvector 与规模化评测:not started**
+- **Phase 9E — After-Sales Execution + Verify:completed**(仅 REFUND 真正执行:既有 Risk Gate → 既有 HITL → 既有 Tool Executor → 既有 RefundService → 重新读取业务状态并校验后才 COMPLETED;EXCHANGE / REPAIR 如实记录 NOT_IMPLEMENTED / HUMAN_HANDOFF)
+- **Phase 9F 及以后 — 换货 / 维修真实执行、真实 Embedding / pgvector 与规模化评测:not started**
 - **Phase 9 — Final Demo(现场彩排 / 验收 / 收尾):not started**
 
 ## Phase 1 — Foundation [COMPLETED]
@@ -304,3 +305,23 @@
 - **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 047、ARCHITECTURE.md §27、README.md。
 
 说明：Phase 9D 只做处理方案与工单，不进入 Phase 9E；退款 / 换货 / 维修的**执行**、金额计算与人工复核流程仍属后续阶段。
+
+## Phase 9E — After-Sales Execution + Verify [COMPLETED]
+
+已完成 Phase 9E：让已经 `eligible=true` 且 `TreatmentPlan(action=REFUND, executable=true)` 的 AfterSalesCase 真正走完 **Risk → Execute → Verify → Complete / Human Escalation**，并且**只复用既有安全链**，不新建第二套退款 / 风控 / 审批体系。本阶段**只**让 REFUND 真正执行。
+
+- **唯一执行链**：`TreatmentPlan(action=REFUND, eligible=true)` → 既有 **Risk Gate**（`app.risk.RiskEngine` / `RiskPolicy`，沿用既有 LOW / MEDIUM / HIGH / CRITICAL，未新增风险等级）→ 高风险进入既有 **Human Approval**（`ApprovalService` + `approval_requests`）→ 既有 **Tool Executor** → 既有 **`RefundService.create_refund`**（唯一退款实现，没有 `new_after_sales_refund()`）→ `RefundRepository` → **`BusinessVerifier` 重新读取业务状态** → 只有校验通过才 `COMPLETED`。
+- **Execute ≠ Completed**（Decision 048）：工具调用成功本身**不是**完成。执行后必须由 `BusinessVerifier` 重新从数据库读取退款记录并确认 `refund_exists` / `order_matches` / `status_pending` / `amount_matches_order_total`；`AfterSalesExecutionService` 在写入 `COMPLETED` 前会**再次**按 id 重新读取退款行，取不到即拒绝完成（`EXECUTION_REFUND_MISSING`），没有通过的 verification 也拒绝完成（`EXECUTION_NOT_VERIFIED`）。
+- **Case 关联不新增审批模型**：`case_id` 放进冻结的 `ToolRequest` 参数快照（`check_refund_eligibility` / `create_refund`），审批 Resume 时从快照取回，从而精确完成对应 Case；`ApprovalRequest` 的既有字段（tool_name / tool_arguments / user_id / risk_level / reason / status）保持不变，没有新增 `AfterSalesApproval`。
+- **金额永远来自业务系统**：退款金额由 `RefundService` 从订单总价计算，用户说「退款 5000 元」也只会得到权威金额（ORD-1003 = ¥199.00）；LLM 无法指定金额，也无法绕过 Risk Gate。
+- **Case 状态**：新增 `PENDING_HUMAN`（等待人工）与 `COMPLETED`（仅在重新读取并校验业务状态后写入）。成功路径 `PROCESSING → Execute → Verify → COMPLETED`；拒绝 / Execute 失败 / Verify 失败路径保持 / 回到 `PENDING_HUMAN` 并 `requires_human_review=true`。
+- **执行结果存放**：复用 `after_sales_cases.collected_information` 的 `execution` / `verification` / `refund` / `execution_error` / `requires_human_review`，不新增第二张执行表，也不新增十几个字段。
+- **幂等**：同一案件重复请求不会产生第二笔退款——`RefundService` 既有的在途退款约束拒绝第二次执行（案件转 `REJECTED`，`failed_rules=["no_active_refund"]`，退款总数仍为 1）；已 `COMPLETED` 的案件不会再次进入执行分支。
+- **EXCHANGE / REPAIR 不伪造**：本阶段没有可执行的换货 / 维修业务系统，二者如实记录 `NOT_IMPLEMENTED` + `HUMAN_HANDOFF`（或资格未覆盖时保持 `ELIGIBILITY_CHECK` 的 `policy_covers_action` 拒绝），**绝不**声称「换货成功 / 维修成功」。
+- **顺带修复（9E 前置缺陷）**：`backend/app/after_sales/policy.py` 的 `extract_policy_facts` 原先只扫描检索结果中「第一个」属于目标类别的 chunk 并立即 `break`；排序第一的退款政策 chunk（适用范围）本身不含时效窗口，导致退款资格始终为 `None`（「缺少可用的签收时间」），9E 的退款闭环无法到达执行。修复后改为在同一类别内继续扫描，取**真正写明窗口**的第一个 chunk 及其 citation。这是对既有读取行为的修正，不是新增业务规则，也没有硬编码政策数值。
+- **Demo**：`/api/v1/demo/chat` payload 新增 `execution` / `verification`，timeline 只在真实发生时才展示 `Risk Gate → Approval → Execute → Verify` 步骤（未发生的步骤不展示）。人工拒绝 / 执行失败 / 校验失败 / 换货转人工都给出如实文案，例如「退款已提交，但执行后校验未能确认成功，已转人工复核，未向您确认完成。」
+- **Evaluation**：新增 8 个固定 case（E1 合法退款 HIGH → COMPLETED、E2 高额 1299 → CRITICAL → COMPLETED、E3 人工拒绝不执行、E4 Execute 失败不完成且不伪造 refund id、E5 Verify 失败不得 COMPLETED、E6 重复执行只产生一笔退款、E7 换货不伪造、E8 维修不伪造）与 3 项指标 `completion_correctness` / `approval_gate_correctness` / `duplicate_execution_rate`（复用既有 `execution_success` / `verification_success`）；全量 **31/31 PASS**。失败注入发生在真实 `RefundService` / `BusinessVerifier` 内部，不是伪造结果。
+- **测试**：新增 `tests/test_after_sales_execution.py`（23 例，覆盖任务要求的 20 项：Risk 3 / Execute 4 / Verify 3 / Idempotency 1 / Case 4 / 安全 3 / 回归 3 / 状态机 1，含两条 Prompt Injection）。全套 **533 例全绿**（510 → 533，无既有断言被削弱）；backend `compileall` 通过；零新增第三方依赖。
+- **文档**：DEVELOPMENT_PLAN.md（本节）、DECISIONS.md Decision 048、ARCHITECTURE.md §28、README.md。
+
+说明：Phase 9E 只让 REFUND 真正执行，不进入 Phase 9F；换货 / 维修的真实执行、真实支付 / 银行 API、向量数据库与规模化评测仍属后续阶段。

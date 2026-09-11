@@ -134,11 +134,19 @@ def extract_policy_facts(
             if str(category_value) != expected_category:
                 continue
             covers_action = True
-            window_days = parse_window_days(str(getattr(item, "content", "")))
-            if window_days is not None:
-                window_citation = str(item.citation)
-            requires_quality_issue = "质量问题" in str(getattr(item, "content", ""))
-            break
+            content = str(getattr(item, "content", ""))
+            if "质量问题" in content:
+                requires_quality_issue = True
+            # Keep scanning the retrieved evidence of THIS category: the
+            # highest-ranked chunk is not always the one stating the window
+            # (e.g. "退款政策 / 适用范围" has no window while "不可退款情形"
+            # states "超出十五天退款时效"). The first chunk that really states
+            # a window wins, and its citation is preserved - the policy text in
+            # the knowledge base stays the single source of truth.
+            if window_days is None:
+                window_days = parse_window_days(content)
+                if window_days is not None:
+                    window_citation = str(item.citation)
 
     return PolicyFacts(
         action=str(action or ""),

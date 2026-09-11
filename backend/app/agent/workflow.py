@@ -29,10 +29,25 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
 from app.agent.after_sales import (
+    ACTION_EXCHANGE,
+    ACTION_REFUND,
+    ACTION_REPAIR,
+    EXECUTION_COMPLETED,
+    EXECUTION_FAILED,
+    EXECUTION_HUMAN_HANDOFF,
+    EXECUTION_NOT_EXECUTED,
+    EXECUTION_NOT_IMPLEMENTED,
+    EXECUTION_PENDING_APPROVAL,
+    EXECUTION_REJECTED,
+    EXECUTION_VERIFICATION_FAILED,
     STATUS_ELIGIBILITY_CHECK,
+    STATUS_COMPLETED,
+    STATUS_PENDING_HUMAN,
     STATUS_PROCESSING,
     AfterSalesCaseManagerLike,
     AfterSalesCaseOutcome,
+    AfterSalesExecutionOutcome,
+    AfterSalesExecutionRecorderLike,
     AfterSalesInvestigationOutcome,
     AfterSalesTreatmentOutcome,
     AfterSalesTreatmentPlannerLike,
@@ -202,6 +217,7 @@ class AgentWorkflow:
         case_manager: AfterSalesCaseManagerLike | None = None,
         case_investigator: CaseInvestigatorLike | None = None,
         treatment_planner: AfterSalesTreatmentPlannerLike | None = None,
+        execution_recorder: AfterSalesExecutionRecorderLike | None = None,
     ) -> None:
         self._classifier = classifier or DeterministicIntentClassifier()
         self._entity_extractor = entity_extractor or DeterministicEntityExtractor()
@@ -216,6 +232,7 @@ class AgentWorkflow:
         self._case_manager = case_manager
         self._case_investigator = case_investigator
         self._treatment_planner = treatment_planner
+        self._execution_recorder = execution_recorder
 
     @property
     def classifier(self) -> IntentClassifier:
@@ -259,6 +276,10 @@ class AgentWorkflow:
     @property
     def treatment_planner(self) -> AfterSalesTreatmentPlannerLike | None:
         return self._treatment_planner
+
+    @property
+    def execution_recorder(self) -> AfterSalesExecutionRecorderLike | None:
+        return self._execution_recorder
 
 
     def run(
@@ -469,6 +490,14 @@ class AgentWorkflow:
             state.after_sales_treatment = treatment.treatment
             state.after_sales_ticket = treatment.ticket
 
+        # Phase 9E: an executable treatment enters the EXISTING risk-gated tool
+        # chain (Risk Gate -> Human Approval -> Tool Executor -> RefundService)
+        # and the case is only completed after the business state was re-read
+        # and verified (docs/DECISIONS.md Decision 048).
+        execution_result = self._run_case_execution(state, treatment)
+        if execution_result is not None:
+            return execution_result
+
         return AgentResult(
             status=(
                 AgentResultStatus.NEEDS_CLARIFICATION
@@ -483,6 +512,245 @@ class AgentWorkflow:
             after_sales_investigation=investigation.investigation,
             after_sales_treatment=state.after_sales_treatment,
             after_sales_ticket=state.after_sales_ticket,
+        )
+
+    # -- Phase 9E: AfterSalesCase execution + verification ------------------
+
+    def _run_case_execution(
+        self, state: AgentState, treatment: AfterSalesTreatmentOutcome | None
+    ) -> AgentResult | None:
+        """Risk Gate -> Execute -> Verify for an executable TreatmentPlan.
+
+        Only ``action=REFUND`` with ``executable=True`` may enter the existing
+        risk-gated tool chain. EXCHANGE / REPAIR have no real executing business
+        system in this phase, so the case records a human hand-off instead of a
+        fabricated "exchange succeeded" result. This method never decides a risk
+        level, a refund amount or a business rule: the Risk Engine, the Tool
+        Executor and the RefundService stay the single owners of those rules.
+        """
+        recorder = self._execution_recorder
+        if recorder is None or treatment is None:
+            return None
+        case = treatment.case
+        if case.status != STATUS_PROCESSING:
+            # Rejected / inconclusive / already finished cases never execute.
+            return None
+        plan = treatment.treatment if isinstance(treatment.treatment, dict) else {}
+        action = plan.get("action")
+        executable = plan.get("executable") is True
+        state.status = WorkflowStage.CASE_EXECUTION
+        state.after_sales_case = case.to_dict()
+
+        if not executable or action != ACTION_REFUND:
+            if executable and action in (ACTION_EXCHANGE, ACTION_REPAIR):
+                outcome = recorder.record_execution(
+                    case.case_id,
+                    execution={
+                        "status": EXECUTION_NOT_IMPLEMENTED,
+                        "action": action,
+                        "next_step": EXECUTION_HUMAN_HANDOFF,
+                        "reason": (
+                            "This after-sales action has no executable business "
+                            "system in this phase; the case is handed to a human "
+                            "instead of faking an execution result."
+                        ),
+                    },
+                    status=STATUS_PROCESSING,
+                    requires_human_review=True,
+                )
+                return self._attach_case_execution(state, None, outcome)
+            return None
+
+        if self._tool_executor is None:
+            return None
+        # Reuse the EXISTING refund plan: the read-only eligibility check runs
+        # first and create_refund is appended only when the business service
+        # says eligible=True. The case id travels inside the ToolRequest so the
+        # frozen approval snapshot can link back to the case on resume.
+        request = ToolRequest(
+            tool_name="check_refund_eligibility",
+            arguments={"order_id": case.order_id, "case_id": case.case_id},
+            reason=(
+                "Phase 9E after-sales execution: confirm the refund through the "
+                "business service, then execute behind the existing Risk Gate."
+            ),
+            requires_confirmation=False,
+        )
+        if self._risk_engine is None:
+            result = self._execute_tool_plan(state, [request])
+        else:
+            result = self._execute_risk_gated(state, [request], user_confirmed=None)
+        outcome = self._interpret_case_execution(state, result, case_id=case.case_id)
+        return self._attach_case_execution(state, result, outcome)
+
+    def _interpret_case_execution(
+        self, state: AgentState, result: AgentResult, *, case_id: str
+    ) -> AfterSalesExecutionOutcome | None:
+        """Translate one gated run into an explicit case execution outcome.
+
+        The tool response is deliberately not trusted as completion: the only
+        path to COMPLETED is a SUCCESSFUL create_refund whose business state was
+        re-read by the verifier.
+        """
+        recorder = self._execution_recorder
+        if recorder is None:
+            return None
+        refund_result = _find_tool_result(state.tool_results, "create_refund")
+        eligibility_result = _find_tool_result(
+            state.tool_results, "check_refund_eligibility"
+        )
+        risk = _risk_decision_for(state, "create_refund") or _risk_decision_for(
+            state, "check_refund_eligibility"
+        )
+
+        if result.status in (
+            AgentResultStatus.WAITING_HUMAN_APPROVAL,
+            AgentResultStatus.WAITING_USER_CONFIRMATION,
+        ):
+            return recorder.record_execution(
+                case_id,
+                execution={
+                    "status": EXECUTION_PENDING_APPROVAL,
+                    "action": ACTION_REFUND,
+                    "tool": "create_refund",
+                    "approval_id": result.approval_id,
+                    "risk_level": (risk or {}).get("risk_level"),
+                    "amount_source": "RefundService (authoritative order total)",
+                },
+                status=STATUS_PENDING_HUMAN,
+                requires_human_review=True,
+            )
+        if result.status is AgentResultStatus.REJECTED:
+            return recorder.record_execution(
+                case_id,
+                execution={
+                    "status": EXECUTION_REJECTED,
+                    "action": ACTION_REFUND,
+                    "tool": "create_refund",
+                },
+                status=STATUS_PENDING_HUMAN,
+                requires_human_review=True,
+                error=result.error or "Human approval was rejected; nothing executed.",
+            )
+        if refund_result is None:
+            if (
+                eligibility_result is None
+                or str(eligibility_result.get("status")) != ToolResultStatus.SUCCESS.value
+            ):
+                return recorder.record_execution(
+                    case_id,
+                    execution={
+                        "status": EXECUTION_FAILED,
+                        "action": ACTION_REFUND,
+                        "tool": "check_refund_eligibility",
+                    },
+                    status=STATUS_PENDING_HUMAN,
+                    requires_human_review=True,
+                    error=(
+                        (eligibility_result or {}).get("error_message")
+                        or result.error
+                        or "Refund eligibility check failed."
+                    ),
+                )
+            data = eligibility_result.get("data")
+            reason = data.get("reason") if isinstance(data, dict) else None
+            return recorder.record_execution(
+                case_id,
+                execution={
+                    "status": EXECUTION_NOT_EXECUTED,
+                    "action": ACTION_REFUND,
+                    "tool": "create_refund",
+                    "reason": reason
+                    or "The business refund service did not confirm eligibility.",
+                },
+                status=STATUS_PENDING_HUMAN,
+                requires_human_review=True,
+            )
+        if str(refund_result.get("status")) != ToolResultStatus.SUCCESS.value:
+            return recorder.record_execution(
+                case_id,
+                execution={
+                    "status": EXECUTION_FAILED,
+                    "action": ACTION_REFUND,
+                    "tool": "create_refund",
+                },
+                status=STATUS_PENDING_HUMAN,
+                requires_human_review=True,
+                error=refund_result.get("error_message") or "Refund execution failed.",
+            )
+        # The tool reported success - that is NOT completion yet.
+        if result.status is AgentResultStatus.VERIFICATION_FAILED:
+            return recorder.record_execution(
+                case_id,
+                execution={
+                    "status": EXECUTION_VERIFICATION_FAILED,
+                    "action": ACTION_REFUND,
+                    "tool": "create_refund",
+                },
+                status=STATUS_PENDING_HUMAN,
+                verification={
+                    "passed": False,
+                    "tool": "create_refund",
+                    "error": result.error or "Verification failed.",
+                },
+                requires_human_review=True,
+                error=result.error or "Verification failed.",
+            )
+        data = refund_result.get("data")
+        data = data if isinstance(data, dict) else {}
+        return recorder.record_execution(
+            case_id,
+            execution={
+                "status": EXECUTION_COMPLETED,
+                "action": ACTION_REFUND,
+                "tool": "create_refund",
+                "refund_id": data.get("id"),
+                "refund_amount": data.get("amount"),
+                "risk_level": (risk or {}).get("risk_level"),
+                "amount_source": "RefundService (authoritative order total)",
+            },
+            status=STATUS_COMPLETED,
+            verification={
+                "passed": True,
+                "tool": "create_refund",
+                "checked": [
+                    "refund_exists",
+                    "order_matches",
+                    "status_pending",
+                    "amount_matches_order_total",
+                ],
+            },
+            refund=data,
+        )
+
+    def _attach_case_execution(
+        self,
+        state: AgentState,
+        result: AgentResult | None,
+        outcome: AfterSalesExecutionOutcome | None,
+    ) -> AgentResult | None:
+        """Copy the case execution outcome onto the state/result (observability)."""
+        if outcome is None:
+            return result
+        state.after_sales_case = outcome.case.to_dict()
+        state.after_sales_execution = dict(outcome.execution)
+        state.after_sales_verification = (
+            dict(outcome.verification)
+            if isinstance(outcome.verification, dict)
+            else None
+        )
+        base = result or AgentResult(
+            status=AgentResultStatus.SUCCESS, intent=state.intent, route=state.route
+        )
+        return replace(
+            base,
+            after_sales_case=state.after_sales_case,
+            after_sales_eligibility=state.after_sales_eligibility,
+            after_sales_investigation=state.after_sales_investigation,
+            after_sales_treatment=state.after_sales_treatment,
+            after_sales_ticket=state.after_sales_ticket,
+            after_sales_execution=state.after_sales_execution,
+            after_sales_verification=state.after_sales_verification,
         )
 
     def _run_case_treatment(
@@ -968,21 +1236,46 @@ class AgentWorkflow:
         state.status = WorkflowStage.TOOL_EXECUTION
         if not approved:
             state.run_status = AgentRunStatus.REJECTED
-            return state, AgentResult(
+            rejected = AgentResult(
                 status=AgentResultStatus.REJECTED,
                 route=state.route,
                 tool_requests=(),
             )
+            case_id = _case_id_from_arguments(view.tool_arguments)
+            if case_id is not None:
+                outcome = self._interpret_case_execution(
+                    state, rejected, case_id=case_id
+                )
+                rejected = self._attach_case_execution(state, rejected, outcome) or rejected
+            return state, rejected
         request = ToolRequest(
             tool_name=view.tool_name,
             arguments=dict(view.tool_arguments),
             reason="Approved by human; resuming the original ToolRequest snapshot.",
             requires_confirmation=False,
         )
+        # Phase 9E: the frozen approval snapshot still knows which after-sales
+        # case it belongs to, so the resume can complete that exact case.
+        if _case_id_from_arguments(view.tool_arguments) is not None:
+            state.risk_decisions = (
+                {
+                    "tool": view.tool_name,
+                    "risk_level": view.risk_level,
+                    "risk_action": RiskAction.HUMAN_APPROVAL.value,
+                    "policy_id": "",
+                    "reason": view.reason or "Approved by human.",
+                },
+            )
         processed: list[ToolRequest] = []
         results: list[ToolResult] = []
         stop = self._execute_auto_or_confirmed(state, request, processed, results)
+        case_id = _case_id_from_arguments(request.arguments)
         if stop is not None:
+            if case_id is not None:
+                outcome = self._interpret_case_execution(
+                    state, stop, case_id=case_id
+                )
+                stop = self._attach_case_execution(state, stop, outcome) or stop
             return state, stop
         state.run_status = AgentRunStatus.COMPLETED
         result = AgentResult(
@@ -990,6 +1283,9 @@ class AgentWorkflow:
             route=state.route,
             tool_requests=tuple(processed),
         )
+        if case_id is not None:
+            outcome = self._interpret_case_execution(state, result, case_id=case_id)
+            result = self._attach_case_execution(state, result, outcome) or result
         result = self._with_llm_response(
             state, result, user_message=user_message, history=history
         )
@@ -1072,12 +1368,49 @@ def _plan_refund_execution_request(state: AgentState) -> ToolRequest:
     execution step arrives in Phase 5.
     """
     order_id = state.entities.order_id if state.entities else None
+    case = state.after_sales_case
+    case_id = case.get("case_id") if isinstance(case, dict) else None
+    if order_id is None and isinstance(case, dict):
+        order_id = case.get("order_id")
+    arguments: dict = {"order_id": order_id}
+    if case_id:
+        # Phase 9E: keep the case link inside the frozen ToolRequest snapshot so
+        # the approval resume completes exactly this case.
+        arguments["case_id"] = case_id
     return ToolRequest(
         tool_name="create_refund",
-        arguments={"order_id": order_id},
+        arguments=arguments,
         reason=(
             "REFUND_REQUEST intent: eligibility passed; create a refund request "
             "with the service-authoritative amount."
         ),
         requires_confirmation=False,
     )
+
+
+def _find_tool_result(
+    tool_results: tuple[dict, ...], tool_name: str
+) -> dict | None:
+    """Last ToolResult for one tool name (the executed call wins)."""
+    for item in reversed(tool_results):
+        if isinstance(item, dict) and str(item.get("tool_name")) == tool_name:
+            return item
+    return None
+
+
+def _risk_decision_for(state: AgentState, tool_name: str) -> dict | None:
+    """Last Risk Gate decision recorded for one tool name."""
+    for item in reversed(state.risk_decisions):
+        if isinstance(item, dict) and str(item.get("tool")) == tool_name:
+            return item
+    return None
+
+
+def _case_id_from_arguments(arguments: dict | None) -> str | None:
+    """Read the after-sales case link out of a frozen ToolRequest snapshot."""
+    if not isinstance(arguments, dict):
+        return None
+    value = arguments.get("case_id")
+    if isinstance(value, str) and value.strip():
+        return value
+    return None

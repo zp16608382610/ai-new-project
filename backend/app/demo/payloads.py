@@ -589,8 +589,55 @@ def _build_timeline(
         if result.status in (AgentResultStatus.SUCCESS, AgentResultStatus.TOOL_REQUESTED)
         else "failed"
     )
+    # Phase 9E: an after-sales treatment with no executable business system
+    # (exchange / repair) or a business service that refused execution must be
+    # visible instead of silently absent.
+    execution_block = state.after_sales_execution or result.after_sales_execution
+    if isinstance(execution_block, dict) and execution_block:
+        steps.extend(_execution_timeline_steps(execution_block))
     steps.append({"label": "Finalize", "state": final_state, "detail": "Response 生成"})
     return steps
+
+
+def _execution_timeline_steps(execution: JsonDict) -> list[JsonDict]:
+    """Timeline steps for an after-sales execution that produced no write.
+
+    A completed / failed / verification-failed run already renders its Execute
+    and Verify steps from the run status, so only the "no execution happened"
+    outcomes need an explicit, honest step here.
+    """
+    from app.agent.after_sales import (
+        EXECUTION_HUMAN_HANDOFF,
+        EXECUTION_NOT_EXECUTED,
+        EXECUTION_NOT_IMPLEMENTED,
+    )
+
+    status = str(execution.get("status") or "")
+    if status == EXECUTION_NOT_IMPLEMENTED:
+        action = str(execution.get("action") or "")
+        return [
+            {
+                "label": "Execution",
+                "state": "waiting",
+                "detail": (
+                    f"{zh_label(action, action)} 已生成处理方案并创建工单,"
+                    "但本阶段没有可执行的真实业务系统,已转人工处理。"
+                ),
+                "next_step": EXECUTION_HUMAN_HANDOFF,
+            }
+        ]
+    if status == EXECUTION_NOT_EXECUTED:
+        return [
+            {
+                "label": "Execution",
+                "state": "waiting",
+                "detail": (
+                    "业务系统未确认该售后动作可执行,未发起任何写操作:"
+                    f"{execution.get('reason') or '需要人工复核'}"
+                ),
+            }
+        ]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +685,11 @@ def build_run_payload(
     # Phase 9D: deterministic treatment plan + the after-sales ticket (if any).
     treatment_block = state.after_sales_treatment or result.after_sales_treatment
     ticket_block = state.after_sales_ticket or result.after_sales_ticket
+    # Phase 9E: risk-gated execution + the independent verification result.
+    execution_block = state.after_sales_execution or result.after_sales_execution
+    verification_block = (
+        state.after_sales_verification or result.after_sales_verification
+    )
 
     risk: JsonDict | None = None
     approval_block: JsonDict | None = None
@@ -735,6 +787,12 @@ def build_run_payload(
             dict(treatment_block) if isinstance(treatment_block, dict) else None
         ),
         "ticket": (dict(ticket_block) if isinstance(ticket_block, dict) else None),
+        "execution": (
+            dict(execution_block) if isinstance(execution_block, dict) else None
+        ),
+        "verification": (
+            dict(verification_block) if isinstance(verification_block, dict) else None
+        ),
         "expected_refund": {"amount": expected_amount, "order_ref": expected_refund_order}
         if expected_amount is not None
         else None,
@@ -777,6 +835,8 @@ def build_text(
             state.after_sales_eligibility or result.after_sales_eligibility,
             state.after_sales_treatment or result.after_sales_treatment,
             state.after_sales_ticket or result.after_sales_ticket,
+            state.after_sales_execution or result.after_sales_execution,
+            state.after_sales_verification or result.after_sales_verification,
         )
 
     if status in (AgentResultStatus.WAITING_USER_CONFIRMATION.value,):
@@ -846,6 +906,8 @@ def _case_text(
     eligibility: JsonDict | None = None,
     treatment: JsonDict | None = None,
     ticket: JsonDict | None = None,
+    execution: JsonDict | None = None,
+    verification: JsonDict | None = None,
 ) -> str:
     """Deterministic reply for the after-sales case branch (9B + 9C + 9D).
 
@@ -856,6 +918,15 @@ def _case_text(
     already decided: it never re-derives eligibility, never invents a policy
     claim and never claims a ticket that was not created.
     """
+    from app.agent.after_sales import (
+        EXECUTION_COMPLETED,
+        EXECUTION_FAILED,
+        EXECUTION_NOT_EXECUTED,
+        EXECUTION_PENDING_APPROVAL,
+        EXECUTION_REJECTED,
+        EXECUTION_VERIFICATION_FAILED,
+    )
+
     if not isinstance(eligibility, dict) or not eligibility:
         collected = case.get("collected_information")
         stored = collected.get("eligibility") if isinstance(collected, dict) else None
@@ -864,6 +935,43 @@ def _case_text(
     missing = [str(item) for item in (case.get("missing_information") or [])]
     action = _CASE_ACTION_LABEL.get(str(case.get("requested_action") or ""), "售后")
     reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
+
+    # Phase 9E: report what the execution step really did. Only a verified
+    # execution may claim the case is completed; a failure / a pending approval
+    # / a refused business action is reported as exactly that.
+    if isinstance(execution, dict) and execution:
+        execution_status = str(execution.get("status") or "")
+        case_ref = case.get("case_id")
+        if execution_status == EXECUTION_COMPLETED:
+            return (
+                f"{reason or ''}退款申请已完成处理。\n"
+                f"退款金额：¥{execution.get('refund_amount')}（以订单业务系统实际金额为准）\n"
+                f"退款记录：REFUND-{execution.get('refund_id')}\n"
+                f"售后单号：{case_ref}\n"
+                f"状态：COMPLETED（已由数据库权威状态校验）"
+            )
+        if execution_status == EXECUTION_PENDING_APPROVAL:
+            ref = ""
+            if isinstance(ticket, dict) and ticket.get("ref") is not None:
+                ref = f"，并创建售后工单 {ticket.get('ref')}"
+            return (
+                f"{reason or ''}已生成{action}处理方案{ref}，已提交人工审批，"
+                "审批通过后才会真正执行。"
+            )
+        if execution_status == EXECUTION_REJECTED:
+            return "很抱歉，该售后申请未通过人工审核，因此未执行退款。"
+        if execution_status == EXECUTION_VERIFICATION_FAILED:
+            return (
+                "退款已提交，但执行后校验未能确认成功，已转人工复核，"
+                "未向您确认完成。"
+            )
+        if execution_status == EXECUTION_FAILED:
+            return "退款执行失败，未向您确认完成，已转人工跟进。"
+        if execution_status == EXECUTION_NOT_EXECUTED:
+            return (
+                f"{execution.get('reason') or ''}"
+                "该售后动作未被执行，已转人工复核。"
+            )
 
     # Phase 9D: only an executable plan (definite eligibility + a request the
     # user actually made) may claim a treatment/ticket. Everything else keeps

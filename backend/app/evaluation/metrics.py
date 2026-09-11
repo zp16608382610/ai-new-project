@@ -17,6 +17,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.agent.after_sales import (
+    EXECUTION_COMPLETED,
+    EXECUTION_FAILED,
+    EXECUTION_NOT_EXECUTED,
+    EXECUTION_NOT_IMPLEMENTED,
+    EXECUTION_PENDING_APPROVAL,
+    EXECUTION_REJECTED,
+    EXECUTION_VERIFICATION_FAILED,
+    STATUS_COMPLETED,
+)
 from app.evaluation.dataset import NO_ACTION, EvaluationCase
 
 JsonDict = dict[str, Any]
@@ -36,6 +46,22 @@ METRICS = (
     "ticket_id_presence",
     "duplicate_ticket_rate",
     "execution_not_triggered",
+    # Phase 9E: after-sales execution + verification correctness. The existing
+    # EXECUTION / VERIFICATION metrics are reused for execution_success /
+    # verification_success; these three cover the case-level outcome.
+    "completion_correctness",
+    "approval_gate_correctness",
+    "duplicate_execution_rate",
+)
+
+# Phase 9E: after-sales execution statuses that mean "a write really ran".
+# VERIFICATION_FAILED still means the write executed - only the independent
+# business-state re-read failed, which is what the VERIFICATION metric records.
+_EXECUTED_STATUSES = (EXECUTION_COMPLETED, EXECUTION_VERIFICATION_FAILED)
+_FAILED_STATUSES = (
+    EXECUTION_FAILED,
+    EXECUTION_REJECTED,
+    EXECUTION_NOT_EXECUTED,
 )
 
 # The write/read operation each business route is expected to reach.
@@ -113,7 +139,25 @@ def actual_outcome(payload: JsonDict) -> str:
     agent_status = payload.get("agent_status") or ""
     case = payload.get("case")
     eligibility = payload.get("eligibility")
+    execution = payload.get("execution")
+    if isinstance(execution, dict) and execution:
+        # Phase 9E: the execution step's own status is a distinct outcome - a
+        # refused / failed / not-executed refund is not "the case is processing".
+        execution_status = str(execution.get("status") or "")
+        if execution_status == EXECUTION_REJECTED:
+            return "REJECTED"
+        if execution_status == EXECUTION_VERIFICATION_FAILED:
+            return "VERIFICATION_FAILED"
+        if execution_status == EXECUTION_FAILED:
+            return "ERROR"
+        if execution_status == EXECUTION_PENDING_APPROVAL:
+            return "HUMAN_APPROVAL"
+        if execution_status == EXECUTION_NOT_EXECUTED:
+            return "NOT_EXECUTED"
     if isinstance(eligibility, dict) and eligibility:
+        # Phase 9E: a verified execution is its own, terminal outcome.
+        if isinstance(case, dict) and case.get("status") == STATUS_COMPLETED:
+            return "COMPLETED"
         # Phase 9C: the after-sales conclusion is its own outcome. A successful
         # answer is NOT the same as a completed after-sales case.
         if eligibility.get("eligible") is True:
@@ -156,6 +200,16 @@ def actual_execution(payload: JsonDict, case: EvaluationCase) -> bool | None:
     """
     tool = ROUTE_PRIMARY_TOOL.get(case.expected_route or "")
     if tool is None:
+        # Phase 9E: after-sales cases execute through the same tool chain but
+        # their route is AFTER_SALES_CASE. Read the execution block the workflow
+        # recorded instead of guessing a tool name.
+        execution = payload.get("execution")
+        if isinstance(execution, dict) and execution:
+            status = str(execution.get("status") or "")
+            if status in _EXECUTED_STATUSES:
+                return True
+            if status in _FAILED_STATUSES:
+                return False
         return None
     step = _tool_step(payload, tool)
     if step is None:
@@ -168,6 +222,12 @@ def actual_execution(payload: JsonDict, case: EvaluationCase) -> bool | None:
 
 
 def actual_verification(payload: JsonDict) -> bool | None:
+    verification = payload.get("verification")
+    if isinstance(verification, dict) and verification:
+        if verification.get("passed") is True:
+            return True
+        if verification.get("passed") is False:
+            return False
     step = None
     for item in payload.get("steps") or []:
         if item.get("label") == "Verify":
@@ -192,8 +252,10 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
     eligibility = payload.get("eligibility")
     treatment = payload.get("treatment")
     ticket = payload.get("ticket")
+    execution_block = payload.get("execution")
     treatment_view = treatment if isinstance(treatment, dict) else {}
     ticket_view = ticket if isinstance(ticket, dict) else {}
+    execution_view = execution_block if isinstance(execution_block, dict) else {}
     return {
         "intent": payload.get("intent"),
         "route": payload.get("route"),
@@ -231,6 +293,16 @@ def actuals_from_payload(case: EvaluationCase, payload: JsonDict) -> JsonDict:
         "ticket_id": ticket_view.get("id"),
         "ticket_count": ticket_view.get("count"),
         "execution_triggered": execution_triggered(payload),
+        # Phase 9E: the execution the workflow really performed (risk-gated tool
+        # chain) and the case's terminal state.
+        "execution_status": execution_view.get("status"),
+        "refund_id": execution_view.get("refund_id"),
+        "refund_amount": execution_view.get("refund_amount"),
+        "case_completed": (
+            isinstance(case_view, dict) and case_view.get("status") == STATUS_COMPLETED
+        ),
+        # Filled in by the runner from the case's own database.
+        "refund_count": None,
     }
 
 
@@ -242,8 +314,15 @@ def evaluate_case(
     case: EvaluationCase,
     initial_payload: JsonDict,
     final_payload: JsonDict | None = None,
+    *,
+    refund_count: int | None = None,
 ) -> JsonDict:
-    """Compare one case's expectations to the real run payload(s)."""
+    """Compare one case's expectations to the real run payload(s).
+
+    refund_count is measured by the runner from the isolated case database (it
+    cannot be read from a payload): it proves how many real business refunds the
+    run produced and therefore powers duplicate_execution_rate.
+    """
     final = final_payload if final_payload is not None else initial_payload
     initial = initial_payload
     # Intent/entities/route/risk/approval describe the planning decision, so
@@ -251,6 +330,8 @@ def evaluate_case(
     # describe what finally happened (they may include a resumed approval).
     plan = actuals_from_payload(case, initial)
     done = actuals_from_payload(case, final)
+    plan["refund_count"] = refund_count
+    done["refund_count"] = refund_count
 
     checks: list[JsonDict] = []
     # INTENT
@@ -400,6 +481,78 @@ def evaluate_case(
             == case.expected_execution_not_triggered,
             "actual": done["execution_triggered"],
         })
+    # Phase 9E: completion correctness (case state + execution status).
+    if case.expected_completed is None and case.expected_execution_status is None:
+        checks.append({
+            "metric": "completion_correctness", "expected": None, "passed": None,
+            "actual": {
+                "case_completed": done["case_completed"],
+                "execution_status": done["execution_status"],
+            },
+        })
+    else:
+        completion_ok = True
+        if case.expected_completed is not None:
+            completion_ok = completion_ok and (
+                done["case_completed"] == case.expected_completed
+            )
+        if case.expected_execution_status is not None:
+            completion_ok = completion_ok and (
+                done["execution_status"] == case.expected_execution_status
+            )
+        checks.append({
+            "metric": "completion_correctness",
+            "expected": {
+                "case_completed": case.expected_completed,
+                "execution_status": case.expected_execution_status,
+            },
+            "passed": completion_ok,
+            "actual": {
+                "case_completed": done["case_completed"],
+                "execution_status": done["execution_status"],
+            },
+        })
+    # Phase 9E: the Risk Gate really stopped the run before any write when the
+    # policy requires human approval / user confirmation.
+    if case.expected_requires_approval is None:
+        checks.append({
+            "metric": "approval_gate_correctness", "expected": None, "passed": None,
+            "actual": plan["run_status"],
+        })
+    else:
+        # The gate must really engage BEFORE any write: a HUMAN_APPROVAL case
+        # has to stop waiting for a human, and any other case must not.
+        gated_human = plan["run_status"] == "WAITING_HUMAN_APPROVAL"
+        if case.expected_requires_approval is True:
+            gate_ok = gated_human
+        else:
+            gate_ok = not gated_human
+            if (
+                case.expected_risk_action == "USER_CONFIRM"
+                and case.user_confirmed is None
+            ):
+                gate_ok = gate_ok and (
+                    plan["run_status"] == "WAITING_USER_CONFIRMATION"
+                )
+        checks.append({
+            "metric": "approval_gate_correctness",
+            "expected": case.expected_requires_approval,
+            "passed": gate_ok,
+            "actual": plan["run_status"],
+        })
+    # Phase 9E: duplicate execution protection (exactly N business refunds).
+    if case.expected_refund_count is None:
+        checks.append({
+            "metric": "duplicate_execution_rate", "expected": None, "passed": None,
+            "actual": done["refund_count"],
+        })
+    else:
+        checks.append({
+            "metric": "duplicate_execution_rate",
+            "expected": case.expected_refund_count,
+            "passed": done["refund_count"] == case.expected_refund_count,
+            "actual": done["refund_count"],
+        })
     checks.append({
         "metric": "OUTCOME", "expected": case.expected_outcome,
         "passed": done["outcome"] == case.expected_outcome, "actual": done["outcome"],
@@ -430,6 +583,9 @@ def evaluate_case(
             "outcome": case.expected_outcome,
             "treatment_action": case.expected_treatment_action,
             "ticket_created": case.expected_ticket_created,
+            "execution_status": case.expected_execution_status,
+            "case_completed": case.expected_completed,
+            "refund_count": case.expected_refund_count,
         },
         "actual": done,
         "status": status,
@@ -467,6 +623,9 @@ def summarize(case_results: list[JsonDict]) -> JsonDict:
                 "ticket_id_presence": "Ticket ID Presence",
                 "duplicate_ticket_rate": "Duplicate Ticket Rate",
                 "execution_not_triggered": "Execution Not Triggered",
+                "completion_correctness": "After-sales Completion Correctness",
+                "approval_gate_correctness": "Approval Gate Correctness",
+                "duplicate_execution_rate": "Duplicate Execution Rate",
             }[metric],
             "passed": passed,
             "applicable": len(applicable),

@@ -34,6 +34,7 @@ from app.retrieval.pipeline import RetrievalPipeline
 from app.risk import RiskEngine
 from app.services.approval_service import ApprovalService
 from app.services.after_sales_case_manager import AfterSalesCaseManager
+from app.services.after_sales_execution import AfterSalesExecutionService
 from app.services.after_sales_investigation import AfterSalesInvestigationService
 from app.services.after_sales_treatment import AfterSalesTreatmentService
 from app.services.verification import BusinessVerifier
@@ -89,6 +90,9 @@ class DemoComponents:
         # Phase 9D: deterministic treatment planning + idempotent after-sales
         # ticket creation (same DB session; nothing is executed).
         self.treatment = AfterSalesTreatmentService(session)
+        # Phase 9E: records the Risk Gate -> Execute -> Verify outcome back onto
+        # the case (it never executes business logic itself).
+        self.execution = AfterSalesExecutionService(session)
         self.workflow = AgentWorkflow(
             retrieval=self.retrieval,
             tool_executor=self.provider,
@@ -100,6 +104,7 @@ class DemoComponents:
             case_manager=self.case_manager,
             case_investigator=self.investigator,
             treatment_planner=self.treatment,
+            execution_recorder=self.execution,
         )
         self.llm_provider_name = "DeepSeek" if llm_intent is not None else None
 
@@ -340,6 +345,13 @@ def finalize_approval(
         user_message=base_message,
         resolution=resolution,
     )
+    if previous:
+        # The approved/rejected resume continues the SAME flow: the planning
+        # blocks recorded by the requesting run (eligibility / treatment /
+        # ticket) are carried forward so the Console still shows the full case.
+        for key in ("case", "eligibility", "investigation", "treatment", "ticket"):
+            if payload.get(key) is None:
+                payload[key] = previous.get(key)
     payload["request_id"] = view_before.request_id
     payload["approval_id"] = approval_id
     payload["approval_resolution"] = resolution

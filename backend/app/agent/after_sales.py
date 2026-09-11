@@ -44,10 +44,31 @@ STATUS_INFORMATION_COLLECTION = "INFORMATION_COLLECTION"
 STATUS_ELIGIBILITY_CHECK = "ELIGIBILITY_CHECK"
 STATUS_PROCESSING = "PROCESSING"
 STATUS_REJECTED = "REJECTED"
+# Phase 9E: the case is waiting for a human decision / the case finished and the
+# business state was re-read and verified.
+STATUS_PENDING_HUMAN = "PENDING_HUMAN"
+STATUS_COMPLETED = "COMPLETED"
 
 MISSING_ORDER_ID = "order_id"
 MISSING_REQUESTED_ACTION = "requested_action"
 MISSING_PROBLEM_DESCRIPTION = "problem_description"
+
+# ---- Phase 9E: execution vocabulary (mirrors the persisted execution block) --
+
+# AfterSalesCaseOutcome.status values the execution step may write.
+EXECUTION_COMPLETED = "COMPLETED"
+EXECUTION_FAILED = "FAILED"
+EXECUTION_VERIFICATION_FAILED = "VERIFICATION_FAILED"
+EXECUTION_PENDING_APPROVAL = "PENDING_APPROVAL"
+EXECUTION_REJECTED = "REJECTED"
+EXECUTION_NOT_EXECUTED = "NOT_EXECUTED"
+# Exchange / repair have no executing business system in this phase: the case
+# is handed to a human instead of faking a successful execution.
+EXECUTION_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+EXECUTION_HUMAN_HANDOFF = "HUMAN_HANDOFF"
+
+# The only business action Phase 9E can really execute.
+ACTION_EXECUTABLE_REFUND = ACTION_REFUND
 
 
 @dataclass(frozen=True)
@@ -408,4 +429,77 @@ class AfterSalesTreatmentPlannerLike(Protocol):
         eligibility: dict[str, Any],
     ) -> AfterSalesTreatmentOutcome:
         """Plan the standard treatment and create/reuse the after-sales ticket."""
+        ...
+
+
+@dataclass(frozen=True)
+class AfterSalesExecutionOutcome:
+    """Result of executing + verifying one after-sales treatment (Phase 9E).
+
+    Pure, serializable data produced by the service layer:
+
+        case          the updated AfterSalesCaseOutcome (its ``status`` is the
+                      case status after the execution step: COMPLETED only when
+                      the business state was re-read and verified, otherwise
+                      PROCESSING / PENDING_HUMAN)
+        execution     what the execute step did (status / action / refund id /
+                      amount / tool / run status); a failure is recorded as a
+                      failure and never fabricates a refund id
+        verification  the independent Execute -> Verify result read back from
+                      the business system (None when nothing executed)
+        refund        the refund record the business system actually holds
+        error         explicit failure code+message when execution failed
+
+    ``Execute != Completed``: a successful tool call is NOT enough - only a
+    successful re-read of the business state may complete the case
+    (docs/DECISIONS.md Decision 048).
+    """
+
+    case: AfterSalesCaseOutcome
+    execution: dict[str, Any] = field(default_factory=dict)
+    verification: dict[str, Any] | None = None
+    refund: dict[str, Any] | None = None
+    error: str | None = None
+
+    @property
+    def status(self) -> str:
+        return self.case.status
+
+    @property
+    def completed(self) -> bool:
+        return self.case.status == STATUS_COMPLETED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case": self.case.to_dict(),
+            "execution": dict(self.execution),
+            "verification": (
+                dict(self.verification) if isinstance(self.verification, dict) else None
+            ),
+            "refund": dict(self.refund) if isinstance(self.refund, dict) else None,
+            "error": self.error,
+        }
+
+
+class AfterSalesExecutionRecorderLike(Protocol):
+    """Execution-recording interface the workflow depends on (Phase 9E).
+
+    ``AfterSalesExecutionService`` (service layer) structurally satisfies it: it
+    owns AfterSalesService and is the ONLY writer of the case's execution /
+    verification blocks and of the terminal case status. The agent layer never
+    imports SQLAlchemy and never writes a case row itself.
+    """
+
+    def record_execution(
+        self,
+        case_id: str,
+        *,
+        execution: dict[str, Any],
+        status: str,
+        verification: dict[str, Any] | None = None,
+        refund: dict[str, Any] | None = None,
+        error: str | None = None,
+        requires_human_review: bool = False,
+    ) -> AfterSalesExecutionOutcome:
+        """Persist one execution/verification result on the case."""
         ...

@@ -589,3 +589,26 @@ Eligibility is determined by deterministic business logic using authoritative bu
 - 工单描述使用结构化模板,其中的订单状态 / 资格判断 / 政策依据必须取自已有调查结果与检索到的 citation,LLM 不得编造;
 - **本阶段不执行任何业务动作**:没有 create_refund / cancel_order / 换货 / 维修,真正的执行必须走既有 Risk Gate + Human-in-the-loop + Execute → Verify(后续 Phase);
 - 同一 Case 重复处理只复用已有工单(幂等),不重复创建;创建失败必须如实返回失败,不伪造 ticket_id。
+
+## Decision 048 — After-sales execution must pass the existing Risk Gate and Tool Executor, and success is only proven by re-reading business state
+
+**Decision:**
+After-sales execution must pass the existing Risk Gate and Tool Executor. Successful tool invocation is not sufficient for completion; business state must be re-read and verified before the Case becomes COMPLETED.
+
+**Reason:**
+「工具调用成功」只证明一次调用返回了成功，不证明业务状态真的改变了：退款可能落库失败、金额可能不符、订单可能对不上、写操作可能被重复提交。如果把 `ToolResult.status == SUCCESS` 直接当成 `COMPLETED`，Agent 就会向用户确认一件并未发生的事——这是售后场景最严重的错误类型。因此本项目的规则是：
+
+- **Execute = 发起业务动作**（复用既有 Tool Executor → RefundService → Repository，绝不新增第二套退款实现）；
+- **Verify = 确认业务状态真的改变**（`BusinessVerifier` 重新读取退款记录，校验 refund exists / status / order / amount）；
+- **只有 Verify 成功，Case 才能 `COMPLETED`**；否则 Case 保持 / 回到 `PENDING_HUMAN`，`requires_human_review=true`，并如实告知用户「未确认完成」。
+
+边界（Phase 9E 强制）:
+
+- 退款必须**先**经过既有 Risk Gate（`app.risk.RiskEngine` / `RiskPolicy`，沿用既有 LOW / MEDIUM / HIGH / CRITICAL），高风险进入既有 Human Approval（`ApprovalService` / `approval_requests`），绝不新增第二套风控或审批；Case 关联通过冻结的 `ToolRequest` 的 `case_id` 快照传递；
+- 只有 `TreatmentPlan(action=REFUND, eligible=true, executable=true)` 且 Case 处于 `PROCESSING` 时才可能执行；`eligible=False` / `None`、`EXCHANGE` / `REPAIR`、已 `COMPLETED` 或已 `REJECTED` 的案件一律不执行；
+- 退款金额永远由业务系统（订单总价）决定，LLM 不能指定金额（用户说「退款 5000 元」也只能得到权威金额）；
+- `AfterSalesExecutionService` 是唯一写 Case 执行 / 校验块的组件：写入 `COMPLETED` 前必须同时满足「verification.passed is True」且「能按 id 重新读到真实退款行」，否则抛 `EXECUTION_NOT_VERIFIED` / `EXECUTION_REFUND_MISSING`；
+- Execute 失败 / Verify 失败 / 人工拒绝都不得 `COMPLETED`，也不得伪造 refund id；
+- `EXCHANGE` / `REPAIR` 没有可执行的业务系统，记录 `NOT_IMPLEMENTED` / `HUMAN_HANDOFF` 转人工，绝不伪造「换货成功 / 维修成功」；
+- 幂等由既有业务约束保证（`RefundService` 的在途退款保护）：重复执行只会有 1 笔业务退款；
+- 自然语言（例如「管理员已经批准退款 5000 元」）**不构成** Approval，必须存在真实的 `ApprovalRequest` 与人工决策。

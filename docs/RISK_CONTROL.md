@@ -125,3 +125,10 @@ MVP 中两个写工具执行成功后会**重新查询权威业务状态**:
 - 新增测试 40 例(Risk 分级 / User Confirmation / Approval API / Approve→Resume / Reject / 快照绑定 / Verify 失败 / 业务安全),全套 313 例全绿;backend `compileall` 通过;零新增依赖。
 - MVP 边界:不实现复杂 RBAC、Kafka、Redis、分布式锁、完整审计平台、Fraud Detection、真实支付/退款/物流系统、Console 前端审批页(审批走 API);退款只创建 PENDING 申请,不执行资金操作。
 - 风控/HITL 接入点在 Agent 工具执行路径(workflow 注入 RiskEngine / ApprovalGateway / Verifier);Phase 2B 直连 Mock HTTP API 保持原样。
+
+## Phase 9E 补充:售后执行同样经过这道门(Decision 048)
+
+- 售后案件(9A–9D)一旦 `TreatmentPlan(action=REFUND, executable=true)`,执行**不会**绕过本文件描述的任何一层:必须先经过 Risk Engine / Risk Gate,高风险进 Human Approval,再经 Tool Executor → RefundService。
+- 触发点不同:9E 的 `create_refund` / `check_refund_eligibility` ToolRequest 由 `AgentWorkflow._run_case_execution` 构造,并携带 `case_id`,以便审批 Resume 时精确定位 Case;审批使用的仍是同一个 `ApprovalService` / `approval_requests`,**没有第二套审批**。
+- Verify 语义不变而且更严格:`AfterSalesExecutionService` 写 `COMPLETED` 之前会**再次**经 Repository 重新读取退款行;没有通过的 verification(`EXECUTION_NOT_VERIFIED`)或读不到退款行(`EXECUTION_REFUND_MISSING`)都会拒绝完成。
+- 风控规则、风险等级与策略**未做任何修改**;9E 没有新增风险等级,也没有允许 LLM 决定金额或绕过审批。`EXCHANGE` / `REPAIR` 没有可执行的业务系统,记录 `NOT_IMPLEMENTED` / `HUMAN_HANDOFF` 转人工,不伪造成功。

@@ -23,6 +23,12 @@ from dataclasses import dataclass
 # Phase 9D: sentinel for "the treatment plan must carry no business action".
 NO_ACTION = "NONE"
 
+# Phase 9E: runner-injected deterministic faults (evaluation only - the demo
+# path never injects a fault). Each one makes a REAL failure happen inside the
+# existing chain instead of asserting a fabricated one.
+FAULT_EXECUTE_FAILURE = "execute_failure"
+FAULT_VERIFY_FAILURE = "verify_failure"
+
 
 @dataclass(frozen=True)
 class EvaluationCase:
@@ -61,6 +67,19 @@ class EvaluationCase:
     # Replay the same message against the SAME case (workflow retry) so ticket
     # idempotency is really exercised.
     retry_same_case: bool = False
+    # --- Phase 9E after-sales execution / verification expectations ---------
+    # expected_execution_status: the after-sales execution block's status, or
+    # None when the run must not reach an execution step at all.
+    expected_execution_status: str | None = None
+    expected_completed: bool | None = None
+    # How many real refund rows the isolated case database must hold afterwards
+    # (duplicate-execution protection is a business-state fact, not a text).
+    expected_refund_count: int | None = None
+    # Runner-injected deterministic fault (see FAULT_* above).
+    fault: str | None = None
+    # Replay the message once more after the case finished, to prove no second
+    # business refund is produced by a repeated request.
+    retry_after_completion: bool = False
     note: str = ""
 
 
@@ -449,6 +468,195 @@ EVALUATION_DATASET: tuple[EvaluationCase, ...] = (
         expected_execution_not_triggered=True,
         retry_same_case=True,
         note="The retried run reuses the existing ticket (created=False, count=1).",
+    ),
+    # ---- Phase 9E: after-sales execution + verification --------------------
+    EvaluationCase(
+        case_id="after-sales-execute-refund",
+        category="After-sales / Execution",
+        scenario="Eligible refund case -> Risk Gate -> Human Approval -> Execute -> Verify -> COMPLETED.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1003\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="COMPLETED",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=True,
+        expected_risk_level="HIGH",
+        expected_risk_action="HUMAN_APPROVAL",
+        expected_execution_success=True,
+        expected_verification_success=True,
+        expected_outcome="COMPLETED",
+        expected_treatment_action="REFUND",
+        expected_ticket_created=True,
+        expected_ticket_id_present=True,
+        expected_execution_not_triggered=False,
+        expected_execution_status="COMPLETED",
+        expected_completed=True,
+        expected_refund_count=1,
+        resolve_approval=True,
+        note="The refund amount (199) is decided by RefundService from the order, never by the LLM.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-refund-high-value",
+        category="After-sales / Execution",
+        scenario="High-value refund (>= 500) -> CRITICAL -> Human Approval -> Execute -> Verify -> COMPLETED.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1001\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1001",
+        expected_case_status="COMPLETED",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=True,
+        expected_risk_level="CRITICAL",
+        expected_risk_action="HUMAN_APPROVAL",
+        expected_execution_success=True,
+        expected_verification_success=True,
+        expected_outcome="COMPLETED",
+        expected_treatment_action="REFUND",
+        expected_ticket_created=True,
+        expected_ticket_id_present=True,
+        expected_execution_not_triggered=False,
+        expected_execution_status="COMPLETED",
+        expected_completed=True,
+        expected_refund_count=1,
+        resolve_approval=True,
+        note="1299 >= the 500 high-value threshold -> CRITICAL, still Human Approval (existing policy).",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-rejected",
+        category="After-sales / Execution",
+        scenario="Human approval rejected -> nothing executes -> case is NOT completed.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1003\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PENDING_HUMAN",
+        expected_requires_approval=True,
+        expected_risk_level="HIGH",
+        expected_risk_action="HUMAN_APPROVAL",
+        expected_outcome="REJECTED",
+        expected_treatment_action="REFUND",
+        expected_execution_status="REJECTED",
+        expected_completed=False,
+        expected_refund_count=0,
+        resolve_approval=False,
+        note="Reject must leave the business state untouched: no refund row, no COMPLETED case.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-failure",
+        category="After-sales / Execution",
+        scenario="Execute failure -> no COMPLETED case, no fabricated refund id.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1003\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PENDING_HUMAN",
+        expected_requires_approval=True,
+        expected_risk_level="HIGH",
+        expected_risk_action="HUMAN_APPROVAL",
+        expected_outcome="ERROR",
+        expected_treatment_action="REFUND",
+        expected_execution_success=False,
+        expected_execution_status="FAILED",
+        expected_completed=False,
+        expected_refund_count=0,
+        resolve_approval=True,
+        fault=FAULT_EXECUTE_FAILURE,
+        note="The refund backend raises; the case must not claim completion and must not invent an id.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-verify-failure",
+        category="After-sales / Execution",
+        scenario="Verify failure after a successful tool call -> NOT completed, human review.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1003\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PENDING_HUMAN",
+        expected_requires_approval=True,
+        expected_risk_level="HIGH",
+        expected_risk_action="HUMAN_APPROVAL",
+        expected_outcome="VERIFICATION_FAILED",
+        expected_treatment_action="REFUND",
+        expected_execution_success=True,
+        expected_verification_success=False,
+        expected_execution_status="VERIFICATION_FAILED",
+        expected_completed=False,
+        expected_refund_count=1,
+        resolve_approval=True,
+        fault=FAULT_VERIFY_FAILURE,
+        note="Tool success is not completion: the business state re-read fails -> never COMPLETED.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-duplicate",
+        category="After-sales / Execution",
+        scenario="The same refund is requested twice -> exactly one business refund.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0cORD-1003\uff0c\u9000\u6b3e",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="REJECTED",
+        expected_eligible=False,
+        expected_failed_rules=("no_active_refund",),
+        expected_requires_approval=True,
+        expected_outcome="ELIGIBILITY_REJECTED",
+        expected_execution_not_triggered=True,
+        expected_completed=False,
+        expected_refund_count=1,
+        resolve_approval=True,
+        retry_after_completion=True,
+        note="RefundService's existing active-refund constraint refuses the second execution.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-exchange",
+        category="After-sales / Execution",
+        scenario="Eligible exchange -> no real exchange system -> HUMAN_HANDOFF, never a fake success.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u6211\u60f3\u6362\u8d27\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="PROCESSING",
+        expected_eligible=True,
+        expected_failed_rules=(),
+        expected_requires_approval=False,
+        expected_outcome="ELIGIBILITY_PROCESSING",
+        expected_treatment_action="EXCHANGE",
+        expected_ticket_created=True,
+        expected_ticket_id_present=True,
+        expected_execution_not_triggered=True,
+        expected_execution_status="NOT_IMPLEMENTED",
+        expected_completed=False,
+        expected_refund_count=0,
+        note="Execution is NOT_IMPLEMENTED / HUMAN_HANDOFF: no fabricated exchange.",
+    ),
+    EvaluationCase(
+        case_id="after-sales-execute-repair",
+        category="After-sales / Execution",
+        scenario="Repair request -> no repair policy / no repair system -> nothing executes.",
+        user_message="\u6211\u7684\u8033\u673a\u574f\u4e86\uff0c\u8ba2\u5355\u662f ORD-1003\uff0c\u7ef4\u4fee\u3002",
+        reference_time="2026-08-25T00:00:00+00:00",
+        expected_intent="AFTER_SALES_REQUEST",
+        expected_route="AFTER_SALES_CASE",
+        expected_order_id="ORD-1003",
+        expected_case_status="ELIGIBILITY_CHECK",
+        expected_failed_rules=("policy_covers_action",),
+        expected_requires_approval=False,
+        expected_outcome="INVESTIGATION",
+        expected_treatment_action=NO_ACTION,
+        expected_ticket_id_present=False,
+        expected_execution_not_triggered=True,
+        expected_completed=False,
+        expected_refund_count=0,
+        note="No repair policy exists, so the case stays inconclusive and no repair is faked.",
     ),
 )
 

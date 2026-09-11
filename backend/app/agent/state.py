@@ -77,6 +77,8 @@ class WorkflowStage(str, enum.Enum):
     CASE_INVESTIGATION = "CASE_INVESTIGATION"
     # Phase 9D: deterministic treatment planning + after-sales ticket creation.
     CASE_TREATMENT = "CASE_TREATMENT"
+    # Phase 9E: risk-gated execution + independent verification of a treatment.
+    CASE_EXECUTION = "CASE_EXECUTION"
     ROUTE = "ROUTE"
     RAG = "RAG"
     BUSINESS_TOOL_REQUEST = "BUSINESS_TOOL_REQUEST"
@@ -200,6 +202,11 @@ class AgentResult:
     # None unless the treatment branch really ran.
     after_sales_treatment: JsonDict | None = None
     after_sales_ticket: JsonDict | None = None
+    # Phase 9E: the risk-gated execution result and the independent
+    # verification result read back from the business system. None unless the
+    # execution step really ran.
+    after_sales_execution: JsonDict | None = None
+    after_sales_verification: JsonDict | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -237,6 +244,16 @@ class AgentResult:
                 if self.after_sales_ticket is not None
                 else None
             ),
+            "after_sales_execution": (
+                dict(self.after_sales_execution)
+                if self.after_sales_execution is not None
+                else None
+            ),
+            "after_sales_verification": (
+                dict(self.after_sales_verification)
+                if self.after_sales_verification is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -268,6 +285,26 @@ class AgentResult:
             after_sales_investigation=(
                 dict(data["after_sales_investigation"])
                 if isinstance(data.get("after_sales_investigation"), dict)
+                else None
+            ),
+            after_sales_treatment=(
+                dict(data["after_sales_treatment"])
+                if isinstance(data.get("after_sales_treatment"), dict)
+                else None
+            ),
+            after_sales_ticket=(
+                dict(data["after_sales_ticket"])
+                if isinstance(data.get("after_sales_ticket"), dict)
+                else None
+            ),
+            after_sales_execution=(
+                dict(data["after_sales_execution"])
+                if isinstance(data.get("after_sales_execution"), dict)
+                else None
+            ),
+            after_sales_verification=(
+                dict(data["after_sales_verification"])
+                if isinstance(data.get("after_sales_verification"), dict)
                 else None
             ),
         )
@@ -307,6 +344,10 @@ class AgentState:
     # reused for this case (observability, same shape the demo payload exposes).
     after_sales_treatment: JsonDict | None = None
     after_sales_ticket: JsonDict | None = None
+    # Phase 9E: execution + verification observability (same shape the demo
+    # payload and the evaluation runner read).
+    after_sales_execution: JsonDict | None = None
+    after_sales_verification: JsonDict | None = None
     response: str | None = None
     error: str | None = None
     status: WorkflowStage = WorkflowStage.START
@@ -363,6 +404,16 @@ class AgentState:
                 if self.after_sales_ticket is not None
                 else None
             ),
+            "after_sales_execution": (
+                dict(self.after_sales_execution)
+                if self.after_sales_execution is not None
+                else None
+            ),
+            "after_sales_verification": (
+                dict(self.after_sales_verification)
+                if self.after_sales_verification is not None
+                else None
+            ),
             "response": self.response,
             "error": self.error,
             "status": self.status.value,
@@ -411,6 +462,12 @@ class AgentState:
         ticket_data = data.get("after_sales_ticket")
         if isinstance(ticket_data, dict):
             state.after_sales_ticket = dict(ticket_data)
+        execution_data = data.get("after_sales_execution")
+        if isinstance(execution_data, dict):
+            state.after_sales_execution = dict(execution_data)
+        verification_data = data.get("after_sales_verification")
+        if isinstance(verification_data, dict):
+            state.after_sales_verification = dict(verification_data)
         # retrieved_context is a runtime-only structured object; serialization
         # keeps a summary (see to_dict). Deserialization intentionally restores
         # the serializable contract with retrieved_context=None.

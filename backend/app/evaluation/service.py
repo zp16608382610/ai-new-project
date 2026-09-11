@@ -15,12 +15,19 @@ used exactly like /demo/chat - results then depend on the live model.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
+import unittest.mock
 from datetime import datetime, timezone
 from typing import Any
 
-from app.evaluation.dataset import EvaluationCase, get_dataset
+from app.evaluation.dataset import (
+    FAULT_EXECUTE_FAILURE,
+    FAULT_VERIFY_FAILURE,
+    EvaluationCase,
+    get_dataset,
+)
 from app.evaluation.metrics import evaluate_case, summarize
 
 
@@ -117,36 +124,52 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
     initial_payload: dict[str, Any] | None = None
     final_payload: dict[str, Any] | None = None
     error: str | None = None
-    try:
-        initial_payload = run_chat(
-            session,
-            store,
-            message=case.user_message,
-            user_id=case.user_id,
-            session_id=session_id,
-            user_confirmed=case.user_confirmed,
-            use_llm=use_llm,
-            investigation_reference_time=_reference_time(case),
-        )
-        final_payload = initial_payload
-        approval = initial_payload.get("approval")
-        if case.resolve_approval and isinstance(approval, dict) and approval.get("id") is not None:
-            final_payload = finalize_approval(
+    with _case_faults(case):
+        try:
+            initial_payload = run_chat(
                 session,
                 store,
-                int(approval["id"]),
-                approved=True,
-                resolved_by="evaluation-runner",
+                message=case.user_message,
+                user_id=case.user_id,
+                session_id=session_id,
+                user_confirmed=case.user_confirmed,
                 use_llm=use_llm,
+                investigation_reference_time=_reference_time(case),
             )
-        if case.retry_same_case:
-            # Phase 9D: replay the SAME message against the SAME case so ticket
-            # idempotency is really exercised (never a second ticket).
-            final_payload = _retry_same_case(
-                session, store, case, final_payload or {}, use_llm=use_llm
-            )
-    except Exception as exc:  # a failing case is reported, never hidden
-        error = f"{type(exc).__name__}: {exc}"
+            final_payload = initial_payload
+            approval = initial_payload.get("approval")
+            if (
+                case.resolve_approval is not None
+                and isinstance(approval, dict)
+                and approval.get("id") is not None
+            ):
+                # resolve_approval=True approves, False rejects: both are real
+                # human decisions the workflow must honour.
+                final_payload = finalize_approval(
+                    session,
+                    store,
+                    int(approval["id"]),
+                    approved=bool(case.resolve_approval),
+                    resolved_by="evaluation-runner",
+                    use_llm=use_llm,
+                )
+            if case.retry_same_case:
+                # Phase 9D: replay the SAME message against the SAME case so
+                # ticket idempotency is really exercised (never a second ticket).
+                final_payload = _retry_same_case(
+                    session, store, case, final_payload or {}, use_llm=use_llm
+                )
+            if case.retry_after_completion:
+                # Phase 9E: repeat the request after the case finished. The
+                # business constraint (RefundService active-refund protection)
+                # must refuse a second refund - proven by the refund count.
+                final_payload = _replay_message(session, store, case, use_llm=use_llm)
+        except Exception as exc:  # a failing case is reported, never hidden
+            error = f"{type(exc).__name__}: {exc}"
+
+    # Measured from this case's own isolated database: how many real refunds
+    # exist after the run (the only honest proof of duplicate protection).
+    refund_count = _count_refunds(session, case)
 
     if error is not None:
         return {
@@ -197,7 +220,12 @@ def _run_case(session, case: EvaluationCase, *, use_llm: bool) -> dict[str, Any]
             "checks": [],
         }
 
-    return evaluate_case(case, initial_payload or {}, final_payload or {})
+    return evaluate_case(
+        case,
+        initial_payload or {},
+        final_payload or {},
+        refund_count=refund_count,
+    )
 
 
 def _retry_same_case(session, store, case: EvaluationCase, payload: dict, *, use_llm: bool):
@@ -219,6 +247,78 @@ def _retry_same_case(session, store, case: EvaluationCase, payload: dict, *, use
     from app.services.after_sales_service import AfterSalesService
 
     AfterSalesService(session).update_case(case_id, status=STATUS_ELIGIBILITY_CHECK)
+    return run_chat(
+        session,
+        store,
+        message=case.user_message,
+        user_id=case.user_id,
+        session_id=f"eval-{case.case_id}",
+        user_confirmed=case.user_confirmed,
+        use_llm=use_llm,
+        investigation_reference_time=_reference_time(case),
+    )
+
+
+@contextlib.contextmanager
+def _case_faults(case: EvaluationCase):
+    """Inject one deterministic, REAL failure into the existing chain.
+
+    Evaluation only: the demo path never injects a fault. The injected failure
+    happens inside the real RefundService / BusinessVerifier, so the runner
+    observes a genuine failure path instead of a fabricated result.
+    """
+    stack = contextlib.ExitStack()
+    with stack:
+        if case.fault == FAULT_EXECUTE_FAILURE:
+            from app.services.refund_service import RefundService
+
+            def boom(*args, **kwargs):  # noqa: ANN002, ANN003 - test stub
+                raise RuntimeError("simulated refund backend failure")
+
+            stack.enter_context(
+                unittest.mock.patch.object(RefundService, "create_refund", boom)
+            )
+        elif case.fault == FAULT_VERIFY_FAILURE:
+            from app.services.errors import VerificationFailedError
+            from app.services.verification import BusinessVerifier
+
+            def refuse(self, tool_name, data):  # noqa: ANN001 - test stub
+                if tool_name == "create_refund":
+                    raise VerificationFailedError(
+                        "simulated verification failure: refund not confirmed"
+                    )
+
+            stack.enter_context(
+                unittest.mock.patch.object(BusinessVerifier, "verify", refuse)
+            )
+        yield
+
+
+def _count_refunds(session, case: EvaluationCase) -> int:
+    """Real refund rows for the case's order in its isolated database.
+
+    Counting only the case's own order keeps the seed's unrelated refunds out of
+    the duplicate-execution measurement.
+    """
+    from sqlalchemy import select
+
+    from app.db.models import Refund
+
+    rows = list(session.scalars(select(Refund)).all())
+    order_ref = case.expected_order_id
+    if not order_ref:
+        return len(rows)
+    try:
+        order_id = int(str(order_ref).upper().replace("ORD-", "").replace("ORD", ""))
+    except ValueError:
+        return len(rows)
+    return sum(1 for row in rows if row.order_id == order_id)
+
+
+def _replay_message(session, store, case: EvaluationCase, *, use_llm: bool):
+    """Send the same message again after the case reached a terminal state."""
+    from app.demo.service import run_chat
+
     return run_chat(
         session,
         store,

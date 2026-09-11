@@ -624,3 +624,75 @@ HTTP / Chat
 ### 27.6 明确未实现
 
 退款 / 换货 / 维修的**执行**、售后金额计算、人工复核与审批扩大、售后执行后的 Verify、真实 Embedding 语义政策检索与规模化评测仍属后续 Phase(9E / Phase 8)。本阶段没有触发任何真实业务变更。
+
+## 28. After-Sales Execution + Verify（Phase 9E 落地）
+
+### 28.1 职责边界（本阶段新增的一个角色）
+
+| 角色 | 负责 | 不负责 |
+| --- | --- | --- |
+| Treatment Planner / Ticket Service（9D，既有） | 生成受约束的 `TreatmentPlan`、创建 / 复用售后工单 | 执行任何业务动作 |
+| **AfterSalesExecutionService**（9E，服务层） | 把一次 Risk Gate → Execute → Verify 的结果写回 Case；**只在重新读取并校验业务状态后**才允许 `COMPLETED` | 执行退款、决定风险等级、计算金额、写业务表 |
+| Risk Engine / Risk Gate（5，既有） | 决定是否允许执行（LOW / MEDIUM / HIGH / CRITICAL，规则不变） | 发起业务写操作、决定金额 |
+| ApprovalService / approval_requests（5，既有） | 高风险的人工审批与 Resume | 决定金额或资格 |
+| Tool Executor（4B，既有） | 实际调用工具 | 判定业务是否可以执行 |
+| RefundService / RefundRepository（2B，既有） | 唯一的退款实现与权威业务事实 | 决定是否需要审批 |
+| BusinessVerifier（5，既有） | 执行后重新读取权威业务状态并校验 | 发起业务写操作 |
+
+### 28.2 调用链
+
+```text
+TreatmentPlan(action=REFUND, eligible=true, executable=true)
+  -> AgentWorkflow._run_case_execution
+       |- Case status must be PROCESSING (COMPLETED / REJECTED: no execution)
+       |- ToolRequest(check_refund_eligibility, {order_id, case_id})
+       |- Risk Gate (RiskEngine / RiskPolicy)                 # BEFORE any write
+       |    |- HUMAN_APPROVAL -> ApprovalService -> approval_requests (PENDING)
+       |    |                       -> Case PENDING_HUMAN, execution PENDING_APPROVAL
+       |    '- AUTO_EXECUTE   -> continue
+       '- ToolExecutor -> RefundService.create_refund -> RefundRepository -> DB
+            '- BusinessVerifier.verify (re-reads the refund row)
+                 |- passed  -> record_execution(COMPLETED)
+                 |              '- re-reads the refund row AGAIN before writing COMPLETED
+                 '- failed  -> execution VERIFICATION_FAILED, Case PENDING_HUMAN
+
+Human decision (approve / reject)
+  -> AgentWorkflow.resume_after_approval(approval_id)
+       |- reject  -> execution REJECTED, Case PENDING_HUMAN, nothing written
+       '- approve -> replay the FROZEN ToolRequest snapshot (case_id included)
+                     -> ToolExecutor -> RefundService -> BusinessVerifier
+                     -> Case COMPLETED (or PENDING_HUMAN on failure)
+```
+
+`AfterSalesExecutionService` 是唯一写 Case 执行结果的组件；`AgentWorkflow` 只依赖注入的 `AfterSalesExecutionRecorderLike` Protocol，Agent 层仍然不 import SQLAlchemy。
+
+### 28.3 状态语义
+
+| Case status | 含义 |
+| --- | --- |
+| `PROCESSING` | 售后任务已建立（9D），等待执行 / 正在执行 |
+| `PENDING_HUMAN` | 已发起执行或需要人工决定：等待人工审批、执行失败、校验失败、或换货 / 维修无真实业务系统 |
+| `COMPLETED` | **仅**在重新读取并校验业务状态成功后写入（退款记录真实存在且与订单匹配） |
+| `REJECTED` | 资格被拒 / 业务约束拒绝（例如 `no_active_refund`） |
+
+### 28.4 Execute ≠ Verify
+
+- **Execute** 复用既有 `create_refund` 工具（经既有 Risk Gate 与 Tool Executor），调用的是既有 `RefundService`，不新增第二套退款实现；
+- **Verify** 由 `BusinessVerifier` 重新读取数据库，而不是相信工具返回的 `success`；
+- `AfterSalesExecutionService.record_execution` 在写 `COMPLETED` 前会独立地**再次**按 id 读取退款行：没有通过的 verification → `EXECUTION_NOT_VERIFIED`；读不到退款行 → `EXECUTION_REFUND_MISSING`。两者都会阻止 Case 完成。
+
+### 28.5 幂等与失败语义
+
+- **重复执行**：既有 `RefundService` 的在途退款约束拒绝第二笔，案件转为 `REJECTED`（`failed_rules=["no_active_refund"]`），退款总数保持 1；已 `COMPLETED` 的案件不会再次进入执行分支；
+- **Execute 失败**：`execution.status=FAILED`，`refund_id` 为 `null`，无退款行，Case 转 `PENDING_HUMAN`，绝不声称完成；
+- **Verify 失败**：`execution.status=VERIFICATION_FAILED`，`verification.passed=false`，写操作可能已发生但 Case **不得** `COMPLETED`，转人工复核；
+- **人工拒绝**：`execution.status=REJECTED`，没有任何写操作；
+- **换货 / 维修**：`execution.status=NOT_IMPLEMENTED` + `next_step=HUMAN_HANDOFF`，或资格未覆盖时保持 `ELIGIBILITY_CHECK`，均不伪造成功。
+
+### 28.6 Demo 与 Observability
+
+`/api/v1/demo/chat` payload 新增 `execution` / `verification`；timeline 在真实的 `Risk Gate` / `Approval` / `Execute` / `Verify` 发生时才展示对应步骤，未发生的步骤不展示。文案如实区分「等待人工审批 / 已拒绝 / 执行失败 / 校验未通过 / 未执行」与「已完成（已由数据库权威状态校验）」。
+
+### 28.7 明确未实现
+
+换货 / 维修的真实执行、真实支付 / 银行 API、售后金额与库存联动、LLM 语义 Grounding 验证器、向量数据库（pgvector）与规模化评测仍属后续 Phase（9F / Phase 8）。本阶段只让 REFUND 真正执行，且只有一笔 `RefundStatus.PENDING` 记录，不涉及任何真实资金流动。
